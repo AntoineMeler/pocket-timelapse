@@ -130,7 +130,8 @@ class TimeLapseDataset:
                 interpolation=cv2.INTER_LANCZOS4,
             )
 
-        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if image.shape[0] > image.shape[1]:  # if height > width, rotate
+            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         if image.shape[2] == 4:  # check if image has alpha channel
             alpha = image[..., 3:4]

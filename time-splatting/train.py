@@ -50,9 +50,9 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the time-lapse dataset
-    data_dir: str = "../../balcony1_pano"
+    data_dir: str = "../../gsplat/examples/data/sunnyhoy_cropped_new"
     # Downsample factor for the dataset
-    data_factor: int = 2
+    data_factor: int = 1
     # Directory to save results
     result_dir: str = "results/sunnyhoy"
     # Every N images there is a test image
@@ -81,8 +81,6 @@ class Config:
     # Whether to disable video generation during training and evaluation
     disable_video: bool = False
 
-    # Initialization strategy
-    init_type: str = "random"
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
@@ -114,9 +112,6 @@ class Config:
     visible_adam: bool = False
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = True
-
-    # Use random background for training to discourage transparency
-    random_bkgd: bool = False
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
@@ -179,7 +174,6 @@ class Config:
 
 def create_splats_with_optimizers(
     dataset: TimeLapseDataset,
-    init_type: str = "sfm",
     init_num_pts: int = 100_000,
     init_extent: float = 3.0,
     init_opacity: float = 0.1,
@@ -193,7 +187,6 @@ def create_splats_with_optimizers(
     sparse_grad: bool = False,
     visible_adam: bool = False,
     batch_size: int = 1,
-    feature_dim: Optional[int] = None,
     use_shading: bool = False,
     device: str = "cuda",
     world_rank: int = 0,
@@ -330,10 +323,8 @@ class Runner:
         print("Scene scale:", self.scene_scale)
 
         # Model
-        feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
             dataset=self.trainset,
-            init_type=cfg.init_type,
             init_num_pts=cfg.init_num_pts,
             init_extent=cfg.init_extent,
             init_opacity=cfg.init_opa,
@@ -347,7 +338,6 @@ class Runner:
             sparse_grad=cfg.sparse_grad,
             visible_adam=cfg.visible_adam,
             batch_size=cfg.batch_size,
-            feature_dim=feature_dim,
             use_shading=False,
             device=self.device,
             world_rank=world_rank,
@@ -360,7 +350,6 @@ class Runner:
             self.shading_splats, self.shading_optimizers = (
                 create_splats_with_optimizers(
                     dataset=self.trainset,
-                    init_type=cfg.init_type,
                     init_num_pts=cfg.init_num_pts,
                     init_extent=cfg.init_extent,
                     init_opacity=cfg.init_opa,
@@ -374,7 +363,6 @@ class Runner:
                     sparse_grad=cfg.sparse_grad,
                     visible_adam=cfg.visible_adam,
                     batch_size=cfg.batch_size,
-                    feature_dim=feature_dim,
                     use_shading=True,
                     device=self.device,
                     world_rank=world_rank,
@@ -684,10 +672,10 @@ class Runner:
             if cfg.use_shading:
                 sun_angles = data["sun_angle"].float().to(device)
                 sun_angles[:, 0] += (
-                    np.random.randn() * self.trainset.sun_angle_std[0].item() * 0.3
+                    np.random.randn() * self.trainset.sun_angle_std[0].item() * 0.25
                 )
                 sun_angles[:, 1] += (
-                    np.random.randn() * self.trainset.sun_angle_std[1].item() * 0.3
+                    np.random.randn() * self.trainset.sun_angle_std[1].item() * 0.25
                 )
                 times = torch.cat(
                     [times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1
@@ -1329,18 +1317,6 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
 
 
 if __name__ == "__main__":
-    """
-    Usage:
-
-    ```bash
-    # Single GPU training
-    CUDA_VISIBLE_DEVICES=9 python -m examples.simple_trainer default
-
-    # Distributed training on 4 GPUs: Effectively 4x batch size so run 4x less steps.
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py default --steps_scaler 0.25
-
-    """
-
     # Config objects we can choose between.
     # Each is a tuple of (CLI description, config object).
     configs = {
@@ -1358,8 +1334,8 @@ if __name__ == "__main__":
                 init_scale=0.1,
                 opacity_reg=0.01,
                 scale_reg=0.01,
-                strategy=MCMCStrategy(cap_max=4_000_000, verbose=True),
-                shading_strategy=MCMCStrategy(cap_max=4_000_000, verbose=True),
+                strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
+                shading_strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
             ),
         ),
     }
