@@ -50,9 +50,9 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the time-lapse dataset
-    data_dir: str = "../../gsplat/examples/data/sunnyhoy_cropped_new"
+    data_dir: str = "../../balcony1_pano"
     # Downsample factor for the dataset
-    data_factor: int = 1
+    data_factor: int = 2
     # Directory to save results
     result_dir: str = "results/sunnyhoy"
     # Every N images there is a test image
@@ -137,15 +137,6 @@ class Config:
     # Scale regularization
     scale_reg: float = 0.0
 
-    # Enable camera optimization.
-    pose_opt: bool = False
-    # Learning rate for camera optimization
-    pose_opt_lr: float = 1e-5
-    # Regularization for camera optimization as weight decay
-    pose_opt_reg: float = 1e-6
-    # Add noise to camera extrinsics. This is only to test the camera pose optimization.
-    pose_noise: float = 0.0
-
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
     # Appearance embedding dimension
@@ -155,8 +146,8 @@ class Config:
     # Regularization for appearance optimization as weight decay
     app_opt_reg: float = 1e-6
 
-    # Enable bilateral grid. (experimental)
-    use_bilateral_grid: bool = False
+    # Whether use fused-bilateral grid
+    use_fused_bilagrid: bool = True
     # Shape of the bilateral grid (X, Y, W)
     bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
 
@@ -167,11 +158,8 @@ class Config:
 
     lpips_net: Literal["vgg", "alex"] = "alex"
 
-    # Whether use fused-bilateral grid
-    use_fused_bilagrid: bool = False
-
     # Whether to use shading  Gaussians for intrinsic image decomposition
-    use_shading: bool = False
+    use_shading: bool = True
 
     def adjust_steps(self, strategy, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -335,6 +323,7 @@ class Runner:
         self.trainset = TimeLapseDataset(
             cfg.data_dir,
             split="train",
+            data_factor=cfg.data_factor,
         )
         self.valset = TimeLapseDataset(cfg.data_dir, split="val")
         self.scene_scale = 1.1 * cfg.global_scale
@@ -430,8 +419,6 @@ class Runner:
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
 
-        self.pose_optimizers = []
-
         self.app_optimizers = []
         if cfg.app_opt:
             assert feature_dim is not None
@@ -456,7 +443,7 @@ class Runner:
                 self.app_module = DDP(self.app_module)
 
         self.bil_grid_optimizers = []
-        if cfg.use_bilateral_grid:
+        if cfg.use_fused_bilagrid:
             self.bil_grids = BilateralGrid(
                 len(self.trainset),
                 grid_X=cfg.bilateral_grid_shape[0],
@@ -619,14 +606,8 @@ class Runner:
                 self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
-        if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
-            )
-        if cfg.use_bilateral_grid:
+
+        if cfg.use_fused_bilagrid:
             # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
             schedulers.append(
                 torch.optim.lr_scheduler.ChainedScheduler(
@@ -680,12 +661,6 @@ class Runner:
 
             height, width = pixels.shape[1:3]
 
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
-
             times = (
                 data["time"].float().to(device)
                 + np.random.randn() * self.trainset.time_gap
@@ -734,7 +709,10 @@ class Runner:
                 )
                 colors = colors * shading_colors
 
-            if cfg.use_bilateral_grid:
+            alphas = data["alpha"].to(device) / 255
+            colors = colors * alphas
+
+            if cfg.use_fused_bilagrid:
                 grid_y, grid_x = torch.meshgrid(
                     (torch.arange(height, device=self.device) + 0.5) / height,
                     (torch.arange(width, device=self.device) + 0.5) / width,
@@ -772,7 +750,7 @@ class Runner:
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
 
-            if cfg.use_bilateral_grid:
+            if cfg.use_fused_bilagrid:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
 
@@ -798,10 +776,6 @@ class Runner:
 
             desc = f"loss={loss.item():.3f}| "
 
-            if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
             # write images (gt and render)
@@ -819,7 +793,7 @@ class Runner:
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                if cfg.use_bilateral_grid:
+                if cfg.use_fused_bilagrid:
                     self.writer.add_scalar("train/tvloss", tvloss.item(), step)
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
@@ -842,11 +816,6 @@ class Runner:
                 ) as f:
                     json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
-                if cfg.pose_opt:
-                    if world_size > 1:
-                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                    else:
-                        data["pose_adjust"] = self.pose_adjust.state_dict()
                 if cfg.app_opt:
                     if world_size > 1:
                         data["app_module"] = self.app_module.module.state_dict()
@@ -1079,7 +1048,7 @@ class Runner:
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
-                if cfg.use_bilateral_grid:
+                if cfg.use_fused_bilagrid:
                     cc_colors = color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
@@ -1096,7 +1065,7 @@ class Runner:
                     "num_GS": len(self.splats["means"]),
                 }
             )
-            if cfg.use_bilateral_grid:
+            if cfg.use_fused_bilagrid:
                 print(
                     f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
                     f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}, CC_LPIPS: {stats['cc_lpips']:.3f} "
@@ -1302,13 +1271,13 @@ class Runner:
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode != "albedo":
-            if render_tab_state.render_mode == "shading":
+            if render_tab_state.render_mode == "rgb":
                 render_tab_state.total_gs_count += len(self.shading_splats["means"])
                 render_tab_state.rendered_gs_count += (
                     (shading_info["radii"] > 0).all(-1).sum().item()
                 )
 
-            else:
+            elif self.cfg.use_shading:
                 render_tab_state.total_gs_count = len(self.shading_splats["means"])
                 render_tab_state.rendered_gs_count = (
                     (shading_info["radii"] > 0).all(-1).sum().item()
@@ -1389,8 +1358,8 @@ if __name__ == "__main__":
                 init_scale=0.1,
                 opacity_reg=0.01,
                 scale_reg=0.01,
-                strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
-                shading_strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
+                strategy=MCMCStrategy(cap_max=4_000_000, verbose=True),
+                shading_strategy=MCMCStrategy(cap_max=4_000_000, verbose=True),
             ),
         ),
     }
@@ -1398,23 +1367,13 @@ if __name__ == "__main__":
     cfg.adjust_steps(cfg.strategy, cfg.steps_scaler)
 
     # Import BilateralGrid and related functions based on configuration
-    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
-        if cfg.use_fused_bilagrid:
-            cfg.use_bilateral_grid = True
-            from fused_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
-        else:
-            cfg.use_bilateral_grid = True
-            from lib_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
+    if cfg.use_fused_bilagrid:
+        from fused_bilagrid import (
+            BilateralGrid,
+            color_correct,
+            slice,
+            total_variation_loss,
+        )
 
     # try import extra dependencies
     if cfg.compression == "png":

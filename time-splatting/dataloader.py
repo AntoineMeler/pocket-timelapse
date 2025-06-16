@@ -76,7 +76,10 @@ def datetime_to_relative(
 
 
 class TimeLapseDataset:
-    def __init__(self, path, split: str = "train"):
+    def __init__(self, path, split: str = "train", data_factor: int = 1):
+
+        self.data_factor = data_factor
+
         if split == "train":
             self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
         elif split == "test":
@@ -149,7 +152,28 @@ class TimeLapseDataset:
     def __getitem__(self, item: int) -> Dict[str, Any]:
         index = self.indices[item]
         image_path = self.image_paths[index]
-        image = imageio.imread(image_path)[..., :3]
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+
+        if self.data_factor > 1:
+            image = cv2.resize(
+                image,
+                (
+                    int(image.shape[1] / self.data_factor),
+                    int(image.shape[0] / self.data_factor),
+                ),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
+
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        if image.shape[2] == 4:  # check if image has alpha channel
+            alpha = image[..., 3:4]
+        else:
+            alpha = np.ones((image.shape[0], image.shape[1], 1), dtype=image.dtype)
+        image = image[..., :3]  # remove alpha channel if present
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
         time = self.dates[index]
         angle = self.sun_angles[index]
 
@@ -165,7 +189,8 @@ class TimeLapseDataset:
         else:
             clouds = 0
 
-        fx = fy = 500
+        H = image.shape[0]
+        fx = fy = H / 2
         cy = image.shape[0] / 2
         cx = image.shape[1] / 2
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
@@ -180,6 +205,7 @@ class TimeLapseDataset:
             "sun_angle": torch.tensor(angle).float(),
             "time": time,
             "clouds": clouds,
+            "alpha": torch.from_numpy(alpha).float(),
         }
 
         return data
