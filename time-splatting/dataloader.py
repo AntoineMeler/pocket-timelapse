@@ -17,40 +17,6 @@ from pysolar.solar import get_azimuth, get_altitude
 from dateutil import tz
 
 
-def _get_rel_paths(path_dir: str) -> List[str]:
-    """Recursively get relative paths of files in a directory."""
-    paths = []
-    for dp, dn, fn in os.walk(path_dir):
-        for f in fn:
-            paths.append(os.path.relpath(os.path.join(dp, f), path_dir))
-    return paths
-
-
-def _resize_image_folder(image_dir: str, resized_dir: str, factor: int) -> str:
-    """Resize image folder."""
-    print(f"Downscaling images by {factor}x from {image_dir} to {resized_dir}.")
-    os.makedirs(resized_dir, exist_ok=True)
-
-    image_files = _get_rel_paths(image_dir)
-    for image_file in tqdm(image_files):
-        image_path = os.path.join(image_dir, image_file)
-        resized_path = os.path.join(
-            resized_dir, os.path.splitext(image_file)[0] + ".png"
-        )
-        if os.path.isfile(resized_path):
-            continue
-        image = imageio.imread(image_path)[..., :3]
-        resized_size = (
-            int(round(image.shape[1] / factor)),
-            int(round(image.shape[0] / factor)),
-        )
-        resized_image = np.array(
-            Image.fromarray(image).resize(resized_size, Image.BICUBIC)
-        )
-        imageio.imwrite(resized_path, resized_image)
-    return resized_dir
-
-
 def sun_angle(time: datetime, lat: float = 42.4440, lon: float = -76.5019):
     """
     Returns the sun angle given a location and time

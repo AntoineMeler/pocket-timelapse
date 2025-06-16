@@ -9,45 +9,6 @@ import matplotlib.pyplot as plt
 from matplotlib import colormaps
 
 
-class CameraOptModule(torch.nn.Module):
-    """Camera pose optimization module."""
-
-    def __init__(self, n: int):
-        super().__init__()
-        # Delta positions (3D) + Delta rotations (6D)
-        self.embeds = torch.nn.Embedding(n, 9)
-        # Identity rotation in 6D representation
-        self.register_buffer("identity", torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]))
-
-    def zero_init(self):
-        torch.nn.init.zeros_(self.embeds.weight)
-
-    def random_init(self, std: float):
-        torch.nn.init.normal_(self.embeds.weight, std=std)
-
-    def forward(self, camtoworlds: Tensor, embed_ids: Tensor) -> Tensor:
-        """Adjust camera pose based on deltas.
-
-        Args:
-            camtoworlds: (..., 4, 4)
-            embed_ids: (...,)
-
-        Returns:
-            updated camtoworlds: (..., 4, 4)
-        """
-        assert camtoworlds.shape[:-2] == embed_ids.shape
-        batch_dims = camtoworlds.shape[:-2]
-        pose_deltas = self.embeds(embed_ids)  # (..., 9)
-        dx, drot = pose_deltas[..., :3], pose_deltas[..., 3:]
-        rot = rotation_6d_to_matrix(
-            drot + self.identity.expand(*batch_dims, -1)
-        )  # (..., 3, 3)
-        transform = torch.eye(4, device=pose_deltas.device).repeat((*batch_dims, 1, 1))
-        transform[..., :3, :3] = rot
-        transform[..., :3, 3] = dx
-        return torch.matmul(camtoworlds, transform)
-
-
 class AppearanceOptModule(torch.nn.Module):
     """Appearance optimization module."""
 

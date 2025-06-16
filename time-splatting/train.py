@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
-from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
+from utils import AppearanceOptModule, knn, rgb_to_sh, set_random_seed
 
 from gsplat import export_splats
 from gsplat.compression import PngCompression
@@ -57,10 +57,9 @@ class Config:
     result_dir: str = "results/sunnyhoy"
     # Every N images there is a test image
     test_every: int = 8
-    # A global scaler that applies to the scene size related parameters
-    global_scale: float = 1.0
-    # Normalize the world space
-    normalize_world_space: bool = True
+    # Aspect ratio of the rendered images, used for initialization
+    aspect_ratio: float = 4 / 3
+
     # Port for the viewer server
     port: int = 8080
 
@@ -101,12 +100,10 @@ class Config:
     far_plane: float = 1e10
 
     # Strategy for GS densification
-    strategy: Union[DefaultStrategy, MCMCStrategy] = field(
-        default_factory=DefaultStrategy
-    )
+    strategy: Union[DefaultStrategy, MCMCStrategy] = field(default_factory=MCMCStrategy)
 
     shading_strategy: Union[DefaultStrategy, MCMCStrategy] = field(
-        default_factory=DefaultStrategy
+        default_factory=MCMCStrategy
     )
 
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
@@ -206,6 +203,9 @@ def create_splats_with_optimizers(
     points = torch.rand((init_num_pts, 3))
     points[..., 2] = 1
     points = init_extent * scene_scale * (points * 2 - 1)
+
+    # Manually set 4:3 aspect ratio
+    points[..., 1] *= 3 / 4
 
     if use_shading:
         rgbs = torch.rand((init_num_pts, 1))
@@ -326,7 +326,7 @@ class Runner:
             data_factor=cfg.data_factor,
         )
         self.valset = TimeLapseDataset(cfg.data_dir, split="val")
-        self.scene_scale = 1.1 * cfg.global_scale
+        self.scene_scale = 1.1
         print("Scene scale:", self.scene_scale)
 
         # Model
