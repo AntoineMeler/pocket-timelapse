@@ -749,16 +749,41 @@ class Runner:
                     + cfg.opacity_reg
                     * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
                 )
+
+                if cfg.use_shading:
+                    loss = (
+                        loss
+                        + cfg.opacity_reg
+                        * torch.abs(
+                            torch.sigmoid(self.shading_splats["opacities"])
+                        ).mean()
+                    )
+
             if cfg.scale_reg > 0.0:
                 loss = (
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
-
+                """
                 loss += (
                     cfg.scale_reg
                     * torch.abs(torch.exp(self.splats["time_scales"])).mean()
                 )
+                """
+
+                if cfg.use_shading:
+                    loss += (
+                        +cfg.scale_reg
+                        * torch.abs(torch.exp(self.shading_splats["scales"])).mean()
+                    )
+                    """
+                    loss += (
+                        cfg.scale_reg
+                        * torch.abs(
+                            torch.exp(self.shading_splats["time_scales"])
+                        ).mean()
+                    )
+                    """
 
             loss.backward()
 
@@ -1335,7 +1360,7 @@ if __name__ == "__main__":
                 opacity_reg=0.01,
                 scale_reg=0.01,
                 strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
-                shading_strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
+                shading_strategy=MCMCStrategy(cap_max=500_000, verbose=True),
             ),
         ),
     }
