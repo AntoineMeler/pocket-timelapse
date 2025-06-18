@@ -54,7 +54,7 @@ class Config:
     # Downsample factor for the dataset
     data_factor: int = 1
     # Directory to save results
-    result_dir: str = "results/sunnyhoy"
+    result_dir: str = "results/timelapse"
     # Every N images there is a test image
     test_every: int = 8
     # Aspect ratio of the rendered images, used for initialization
