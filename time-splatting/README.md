@@ -17,9 +17,9 @@ pip install gsplat pysolar pytz
 ```
 
 ## Training a Model
-To train a model with time splatting, specify a densification strategy and a path to a time-lapse dataset. The default strategy is set to Markov Chain Monte Carlo (MCMC). 
+To train a model with time splatting, specify a densification strategy and a path to a time-lapse dataset. The default strategy is set to [Markov Chain Monte Carlo (MCMC)](https://doi.org/10.48550/arXiv.2404.09591). 
 ```bash
 python train.py mcmc --data_dir /path/to/data/dir
 ```
 
-Various splatting techniques, inhereted from gsplat, can also be enabled during training. By default, bilateral guided optimization is enabled, which helps sharpen effects such as shadows. 
+By default, [bilateral-guided optimization](https://doi.org/10.1145/3658148) is enabled, which helps sharpen effects such as shadows. 
