@@ -19,12 +19,11 @@ from dataloader import TimeLapseDataset, sun_angle
 
 from fused_ssim import fused_ssim
 from torch import Tensor
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
-from utils import AppearanceOptModule, knn, rgb_to_sh, set_random_seed
+from utils import AppearanceOptModule, knn, set_random_seed
 
 from gsplat import export_splats
 from gsplat.compression import PngCompression
@@ -62,9 +61,6 @@ class Config:
 
     # Port for the viewer server
     port: int = 8080
-
-    # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1
     # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
@@ -78,8 +74,11 @@ class Config:
     save_ply: bool = False
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [])
-    # Whether to disable video generation during training and evaluation
-    disable_video: bool = False
+
+    # Whether to use shading Gaussians for intrinsic image decomposition
+    use_shading: bool = True
+    # Noise injected to sun angle label to avoid overfitting
+    angle_noise_scale: float = 0.3
 
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
@@ -104,14 +103,14 @@ class Config:
         default_factory=MCMCStrategy
     )
 
+    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
+    antialiased: bool = True
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
     # Use sparse gradients for optimization. (experimental)
     sparse_grad: bool = False
     # Use visible adam from Taming 3DGS. (experimental)
     visible_adam: bool = False
-    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
-    antialiased: bool = True
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
@@ -139,7 +138,7 @@ class Config:
     app_opt_reg: float = 1e-6
 
     # Whether use fused-bilateral grid
-    use_fused_bilagrid: bool = True
+    use_bilagrid: bool = True
     # Shape of the bilateral grid (X, Y, W)
     bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
 
@@ -149,9 +148,6 @@ class Config:
     tb_save_image: bool = False
 
     lpips_net: Literal["vgg", "alex"] = "alex"
-
-    # Whether to use shading  Gaussians for intrinsic image decomposition
-    use_shading: bool = True
 
     def adjust_steps(self, strategy, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -186,11 +182,8 @@ def create_splats_with_optimizers(
     scene_scale: float = 1.0,
     sparse_grad: bool = False,
     visible_adam: bool = False,
-    batch_size: int = 1,
     use_shading: bool = False,
     device: str = "cuda",
-    world_rank: int = 0,
-    world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
 
     points = torch.rand((init_num_pts, 3))
@@ -204,6 +197,7 @@ def create_splats_with_optimizers(
         rgbs = torch.rand((init_num_pts, 1))
     else:
         rgbs = torch.rand((init_num_pts, 3))
+    colors = torch.logit(rgbs)
 
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
     dist2_avg = (knn(points[:, :2], 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
@@ -212,13 +206,6 @@ def create_splats_with_optimizers(
     if use_shading:
         init_scale *= 10
     scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
-
-    # Distribute the GSs to different ranks (also works for single rank)
-    points = points[world_rank::world_size]
-    rgbs = rgbs[world_rank::world_size]
-    scales = scales[world_rank::world_size]
-
-    colors = torch.logit(rgbs)
 
     N = points.shape[0]
     quats = torch.rand((N, 4))  # [N, 4]
@@ -259,11 +246,6 @@ def create_splats_with_optimizers(
 
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
 
-    # Scale learning rate based on batch size, reference:
-    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
-    # Note that this would not make the training exactly equivalent, see
-    # https://arxiv.org/pdf/2402.18824v1
-    BS = batch_size * world_size
     optimizer_class = None
     if sparse_grad:
         optimizer_class = torch.optim.SparseAdam
@@ -273,10 +255,9 @@ def create_splats_with_optimizers(
         optimizer_class = torch.optim.Adam
     optimizers = {
         name: optimizer_class(
-            [{"params": splats[name], "lr": lr * math.sqrt(BS), "name": name}],
-            eps=1e-15 / math.sqrt(BS),
-            # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
-            betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
+            [{"params": splats[name], "lr": lr, "name": name}],
+            eps=1e-15,
+            betas=(0.9, 0.999),
         )
         for name, _, lr in params
     }
@@ -286,16 +267,11 @@ def create_splats_with_optimizers(
 class Runner:
     """Engine for training and testing."""
 
-    def __init__(
-        self, local_rank: int, world_rank, world_size: int, cfg: Config
-    ) -> None:
-        set_random_seed(42 + local_rank)
+    def __init__(self, cfg: Config) -> None:
+        set_random_seed(42)
 
         self.cfg = cfg
-        self.world_rank = world_rank
-        self.local_rank = local_rank
-        self.world_size = world_size
-        self.device = f"cuda:{local_rank}"
+        self.device = "cuda"
 
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
@@ -337,11 +313,8 @@ class Runner:
             scene_scale=self.scene_scale,
             sparse_grad=cfg.sparse_grad,
             visible_adam=cfg.visible_adam,
-            batch_size=cfg.batch_size,
             use_shading=False,
             device=self.device,
-            world_rank=world_rank,
-            world_size=world_size,
         )
 
         self.cfg.strategy.check_sanity(self.splats, self.optimizers)
@@ -362,11 +335,8 @@ class Runner:
                     scene_scale=self.scene_scale,
                     sparse_grad=cfg.sparse_grad,
                     visible_adam=cfg.visible_adam,
-                    batch_size=cfg.batch_size,
                     use_shading=True,
                     device=self.device,
-                    world_rank=world_rank,
-                    world_size=world_size,
                 )
             )
 
@@ -419,19 +389,17 @@ class Runner:
             self.app_optimizers = [
                 torch.optim.Adam(
                     self.app_module.embeds.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size) * 10.0,
+                    lr=cfg.app_opt_lr * 10.0,
                     weight_decay=cfg.app_opt_reg,
                 ),
                 torch.optim.Adam(
                     self.app_module.color_head.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
+                    lr=cfg.app_opt_lr,
                 ),
             ]
-            if world_size > 1:
-                self.app_module = DDP(self.app_module)
 
         self.bil_grid_optimizers = []
-        if cfg.use_fused_bilagrid:
+        if cfg.use_bilagrid:
             self.bil_grids = BilateralGrid(
                 len(self.trainset),
                 grid_X=cfg.bilateral_grid_shape[0],
@@ -441,7 +409,7 @@ class Runner:
             self.bil_grid_optimizers = [
                 torch.optim.Adam(
                     self.bil_grids.parameters(),
-                    lr=2e-3 * math.sqrt(cfg.batch_size),
+                    lr=2e-3,
                     eps=1e-15,
                 ),
             ]
@@ -566,7 +534,6 @@ class Runner:
             ),
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
-            distributed=self.world_size > 1,
             camera_model="ortho",
             **kwargs,
         )
@@ -577,13 +544,10 @@ class Runner:
     def train(self):
         cfg = self.cfg
         device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
 
         # Dump cfg.
-        if world_rank == 0:
-            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
+        with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
+            yaml.dump(vars(cfg), f)
 
         max_steps = cfg.max_steps
         init_step = 0
@@ -595,7 +559,7 @@ class Runner:
             ),
         ]
 
-        if cfg.use_fused_bilagrid:
+        if cfg.use_bilagrid:
             # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
             schedulers.append(
                 torch.optim.lr_scheduler.ChainedScheduler(
@@ -614,7 +578,7 @@ class Runner:
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
-            batch_size=cfg.batch_size,
+            batch_size=1,
             shuffle=True,
             num_workers=4,
             persistent_workers=True,
@@ -672,10 +636,14 @@ class Runner:
             if cfg.use_shading:
                 sun_angles = data["sun_angle"].float().to(device)
                 sun_angles[:, 0] += (
-                    np.random.randn() * self.trainset.sun_angle_std[0].item() * 0.25
+                    np.random.randn()
+                    * self.trainset.sun_angle_std[0].item()
+                    * self.cfg.angle_noise_scale
                 )
                 sun_angles[:, 1] += (
-                    np.random.randn() * self.trainset.sun_angle_std[1].item() * 0.25
+                    np.random.randn()
+                    * self.trainset.sun_angle_std[1].item()
+                    * self.cfg.angle_noise_scale
                 )
                 times = torch.cat(
                     [times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1
@@ -700,7 +668,7 @@ class Runner:
             alphas = data["alpha"].to(device) / 255
             colors = colors * alphas
 
-            if cfg.use_fused_bilagrid:
+            if cfg.use_bilagrid:
                 grid_y, grid_x = torch.meshgrid(
                     (torch.arange(height, device=self.device) + 0.5) / height,
                     (torch.arange(width, device=self.device) + 0.5) / width,
@@ -738,7 +706,7 @@ class Runner:
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
 
-            if cfg.use_fused_bilagrid:
+            if cfg.use_bilagrid:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
 
@@ -791,22 +759,13 @@ class Runner:
 
             pbar.set_description(desc)
 
-            # write images (gt and render)
-            # if world_rank == 0 and step % 800 == 0:
-            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-            #     imageio.imwrite(
-            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-            #         (canvas * 255).astype(np.uint8),
-            #     )
-
-            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
+            if cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                if cfg.use_fused_bilagrid:
+                if cfg.use_bilagrid:
                     self.writer.add_scalar("train/tvloss", tvloss.item(), step)
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
@@ -824,52 +783,14 @@ class Runner:
                 }
                 print("Step: ", step, stats)
                 with open(
-                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
+                    f"{self.stats_dir}/train_step{step:04d}.json",
                     "w",
                 ) as f:
                     json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
                 if cfg.app_opt:
-                    if world_size > 1:
-                        data["app_module"] = self.app_module.module.state_dict()
-                    else:
-                        data["app_module"] = self.app_module.state_dict()
-                torch.save(
-                    data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
-                )
-            if (
-                step in [i - 1 for i in cfg.ply_steps] or step == max_steps - 1
-            ) and cfg.save_ply:
-
-                if self.cfg.app_opt:
-                    # eval at origin to bake the appeareance into the colors
-                    rgb = self.app_module(
-                        features=self.splats["features"],
-                        embed_ids=None,
-                        dirs=torch.zeros_like(self.splats["means"][None, :, :]),
-                        sh_degree=3,
-                    )
-                    rgb = rgb + self.splats["colors"]
-                    rgb = torch.sigmoid(rgb).squeeze(0).unsqueeze(1)
-                    sh0 = rgb_to_sh(rgb)
-                else:
-                    rgb = self.splats["colors"]
-                    rgb = torch.sigmoid(rgb).squeeze(0).unsqueeze(1)
-                    sh0 = rgb_to_sh(rgb)
-
-                means = self.splats["means"]
-                scales = self.splats["scales"]
-                quats = self.splats["quats"]
-                opacities = self.splats["opacities"]
-                export_splats(
-                    means=means,
-                    scales=scales,
-                    quats=quats,
-                    opacities=opacities,
-                    sh0=sh0,
-                    format="ply",
-                    save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
-                )
+                    data["app_module"] = self.app_module.state_dict()
+                torch.save(data, f"{self.ckpt_dir}/ckpt_{step}.pt")
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:
@@ -992,8 +913,6 @@ class Runner:
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
 
         valloader = torch.utils.data.DataLoader(
             self.valset, batch_size=1, shuffle=False, num_workers=1
@@ -1047,57 +966,55 @@ class Runner:
             colors = torch.clamp(colors, 0.0, 1.0)
             canvas_list = [pixels, colors]
 
-            if world_rank == 0:
-                # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
-                canvas = (canvas * 255).astype(np.uint8)
-                imageio.imwrite(
-                    f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
-                    canvas,
-                )
-
-                pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                metrics["psnr"].append(self.psnr(colors_p, pixels_p))
-                metrics["ssim"].append(self.ssim(colors_p, pixels_p))
-                metrics["lpips"].append(self.lpips(colors_p, pixels_p))
-                if cfg.use_fused_bilagrid:
-                    cc_colors = color_correct(colors, pixels)
-                    cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                    metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
-                    metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
-                    metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
-
-        if world_rank == 0:
-            ellipse_time /= len(valloader)
-
-            stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
-            stats.update(
-                {
-                    "ellipse_time": ellipse_time,
-                    "num_GS": len(self.splats["means"]),
-                }
+            # write images
+            canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            canvas = (canvas * 255).astype(np.uint8)
+            imageio.imwrite(
+                f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
+                canvas,
             )
-            if cfg.use_fused_bilagrid:
-                print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
-                    f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}, CC_LPIPS: {stats['cc_lpips']:.3f} "
-                    f"Time: {stats['ellipse_time']:.3f}s/image "
-                    f"Number of GS: {stats['num_GS']}"
-                )
-            else:
-                print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
-                    f"Time: {stats['ellipse_time']:.3f}s/image "
-                    f"Number of GS: {stats['num_GS']}"
-                )
-            # save stats as json
-            with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
-                json.dump(stats, f)
-            # save stats to tensorboard
-            for k, v in stats.items():
-                self.writer.add_scalar(f"{stage}/{k}", v, step)
-            self.writer.flush()
+
+            pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
+            colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+            metrics["psnr"].append(self.psnr(colors_p, pixels_p))
+            metrics["ssim"].append(self.ssim(colors_p, pixels_p))
+            metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+            if cfg.use_bilagrid:
+                cc_colors = color_correct(colors, pixels)
+                cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
+                metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
+                metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
+
+        ellipse_time /= len(valloader)
+
+        stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
+        stats.update(
+            {
+                "ellipse_time": ellipse_time,
+                "num_GS": len(self.splats["means"]),
+            }
+        )
+        if cfg.use_bilagrid:
+            print(
+                f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
+                f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}, CC_LPIPS: {stats['cc_lpips']:.3f} "
+                f"Time: {stats['ellipse_time']:.3f}s/image "
+                f"Number of GS: {stats['num_GS']}"
+            )
+        else:
+            print(
+                f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
+                f"Time: {stats['ellipse_time']:.3f}s/image "
+                f"Number of GS: {stats['num_GS']}"
+            )
+        # save stats as json
+        with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
+            json.dump(stats, f)
+        # save stats to tensorboard
+        for k, v in stats.items():
+            self.writer.add_scalar(f"{stage}/{k}", v, step)
+        self.writer.flush()
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -1177,9 +1094,8 @@ class Runner:
     def run_compression(self, step: int):
         """Entry for running compression."""
         print("Running compression...")
-        world_rank = self.world_rank
 
-        compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
+        compress_dir = f"{cfg.result_dir}/compression"
         os.makedirs(compress_dir, exist_ok=True)
 
         self.compression_method.compress(compress_dir, self.splats)
@@ -1202,10 +1118,8 @@ class Runner:
             width = render_tab_state.viewer_width
             height = render_tab_state.viewer_height
         # c2w = camera_state.c2w
+        c2w = torch.eye(4).float().to(self.device)
         K = camera_state.get_K((width, height))
-        c2w = np.eye(4)
-
-        c2w = torch.from_numpy(c2w).float().to(self.device)
         K = torch.from_numpy(K).float().to(self.device)
 
         end_day: datetime = self.trainset.end_date
@@ -1275,7 +1189,7 @@ class Runner:
                 render_mode="RGB",
                 rasterize_mode=render_tab_state.rasterize_mode,
             )  # [1, H, W, 3]
-            if render_tab_state.render_mode == "rgb":
+            if render_tab_state.render_mode == "full":
                 render_colors = render_colors * shading_colors
             elif render_tab_state.render_mode == "shading":
                 render_colors = shading_colors.repeat(1, 1, 1, 3)
@@ -1284,7 +1198,7 @@ class Runner:
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode != "albedo":
-            if render_tab_state.render_mode == "rgb":
+            if render_tab_state.render_mode == "full":
                 render_tab_state.total_gs_count += len(self.shading_splats["means"])
                 render_tab_state.rendered_gs_count += (
                     (shading_info["radii"] > 0).all(-1).sum().item()
@@ -1311,13 +1225,8 @@ class Runner:
         return renders
 
 
-def main(local_rank: int, world_rank, world_size: int, cfg: Config):
-    if world_size > 1 and not cfg.disable_viewer:
-        cfg.disable_viewer = True
-        if world_rank == 0:
-            print("Viewer is disabled in distributed training.")
-
-    runner = Runner(local_rank, world_rank, world_size, cfg)
+def main(local_rank: int, world_rank: int, world_size: int, cfg: Config):
+    runner = Runner(cfg)
 
     if cfg.ckpt is not None:
         # run eval only
@@ -1360,7 +1269,7 @@ if __name__ == "__main__":
                 opacity_reg=0.01,
                 scale_reg=0.01,
                 strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
-                shading_strategy=MCMCStrategy(cap_max=500_000, verbose=True),
+                shading_strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
             ),
         ),
     }
@@ -1368,7 +1277,7 @@ if __name__ == "__main__":
     cfg.adjust_steps(cfg.strategy, cfg.steps_scaler)
 
     # Import BilateralGrid and related functions based on configuration
-    if cfg.use_fused_bilagrid:
+    if cfg.use_bilagrid:
         from fused_bilagrid import (
             BilateralGrid,
             color_correct,

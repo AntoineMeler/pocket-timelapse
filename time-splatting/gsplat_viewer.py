@@ -19,7 +19,7 @@ class GsplatRenderTabState(RenderTabState):
     radius_clip: float = 0.0
     eps2d: float = 0.3
     backgrounds: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    render_mode: Literal["rgb", "albedo", "shading", "alpha"] = "rgb"
+    render_mode: Literal["full", "albedo", "shading", "alpha"] = "full"
     colormap: Literal["turbo", "viridis", "magma", "inferno", "cividis", "gray"] = (
         "turbo"
     )
@@ -71,7 +71,7 @@ class GsplatViewer(Viewer):
 
                 render_mode_dropdown = server.gui.add_dropdown(
                     "Render Mode",
-                    ("rgb", "albedo", "shading", "alpha"),
+                    ("full", "albedo", "shading", "alpha"),
                     initial_value=self.render_tab_state.render_mode,
                     hint="Render mode to use.",
                 )

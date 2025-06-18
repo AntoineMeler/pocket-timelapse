@@ -3,7 +3,7 @@ import os
 import glob
 from typing import Any, Dict, List, Optional
 
-import cv2
+from PIL import Image
 import numpy as np
 import torch
 
@@ -114,28 +114,27 @@ class TimeLapseDataset:
     def __getitem__(self, item: int) -> Dict[str, Any]:
         index = self.indices[item]
         image_path = self.image_paths[index]
-        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        image = Image.open(image_path)
 
         if self.data_factor > 1:
-            image = cv2.resize(
-                image,
+            image = image.resize(
                 (
-                    int(image.shape[1] / self.data_factor),
-                    int(image.shape[0] / self.data_factor),
+                    int(image.size[0] / self.data_factor),
+                    int(image.size[1] / self.data_factor),
                 ),
-                interpolation=cv2.INTER_LANCZOS4,
+                Image.BICUBIC,
             )
 
-        if image.shape[0] > image.shape[1]:  # if height > width, rotate
-            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if image.size[0] < image.size[1]:  # if height > width, rotate
+            image = image.rotate(90)
+
+        image = np.array(image).astype(np.float32)
 
         if image.shape[2] == 4:  # check if image has alpha channel
             alpha = image[..., 3:4]
         else:
             alpha = np.ones((image.shape[0], image.shape[1], 1), dtype=image.dtype)
         image = image[..., :3]  # remove alpha channel if present
-
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         time = self.dates[index]
         angle = self.sun_angles[index]

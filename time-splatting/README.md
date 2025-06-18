@@ -10,10 +10,10 @@ This codebase was tested with PyTorch 2.7.1 and gsplat v1.5.2.
 ## Dependencies
 Please first install PyTorch, then install the rest of the dependencies.
 ```bash
-pip install torch torchvision torchaudio
+pip install torch torchvision
 ```
 ```bash
-pip install gsplat pysolar pytz
+pip install -r requirements.txt
 ```
 
 ## Training a Model
