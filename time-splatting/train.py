@@ -77,8 +77,10 @@ class Config:
 
     # Whether to use shading Gaussians for intrinsic image decomposition
     use_shading: bool = True
+    # Noise injected to the time label to avoid overfitting
+    time_noise_scale: float = 1
     # Noise injected to sun angle label to avoid overfitting
-    angle_noise_scale: float = 0.3
+    angle_noise_scale: float = 0.4
 
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
@@ -615,7 +617,7 @@ class Runner:
 
             times = (
                 data["time"].float().to(device)
-                + np.random.randn() * self.trainset.time_gap
+                + np.random.randn() * self.trainset.time_gap * cfg.time_noise_scale
             )
 
             # forward
@@ -638,12 +640,12 @@ class Runner:
                 sun_angles[:, 0] += (
                     np.random.randn()
                     * self.trainset.sun_angle_std[0].item()
-                    * self.cfg.angle_noise_scale
+                    * cfg.angle_noise_scale
                 )
                 sun_angles[:, 1] += (
                     np.random.randn()
                     * self.trainset.sun_angle_std[1].item()
-                    * self.cfg.angle_noise_scale
+                    * cfg.angle_noise_scale
                 )
                 times = torch.cat(
                     [times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1
@@ -732,26 +734,24 @@ class Runner:
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
-                """
+
                 loss += (
                     cfg.scale_reg
                     * torch.abs(torch.exp(self.splats["time_scales"])).mean()
                 )
-                """
 
                 if cfg.use_shading:
                     loss += (
                         +cfg.scale_reg
                         * torch.abs(torch.exp(self.shading_splats["scales"])).mean()
                     )
-                    """
+
                     loss += (
                         cfg.scale_reg
                         * torch.abs(
                             torch.exp(self.shading_splats["time_scales"])
                         ).mean()
                     )
-                    """
 
             loss.backward()
 

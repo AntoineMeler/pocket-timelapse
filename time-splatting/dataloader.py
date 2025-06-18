@@ -124,11 +124,11 @@ class TimeLapseDataset:
                 ),
                 Image.BICUBIC,
             )
-
-        if image.size[0] < image.size[1]:  # if height > width, rotate
-            image = image.rotate(90)
-
         image = np.array(image).astype(np.float32)
+        if image.shape[0] > image.shape[1]:  # if height > width, rotate
+            image = np.rot90(
+                image, k=1, axes=(0, 1)
+            ).copy()  # rotate 90 degrees clockwise
 
         if image.shape[2] == 4:  # check if image has alpha channel
             alpha = image[..., 3:4]
