@@ -6,6 +6,7 @@ matplotlib
 nerfview
 pyyaml
 scikit-learn
+splines
 tqdm
 tensorboard
 torchmetrics[image]

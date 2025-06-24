@@ -1,0 +1,30 @@
+[project]
+name = "time-splatting"
+version = "0.1.0"
+description = "Time splatting is a method for reconstructing a time-lapse, and factorizing it into intrinsic images."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fused-bilagrid",
+    "fused-ssim",
+    "gsplat>=1.5.2",
+    "imageio[ffmpeg]>=2.37.0",
+    "matplotlib>=3.10.3",
+    "nerfview>=0.1.3",
+    "pysolar>=0.13",
+    "pytz>=2025.2",
+    "pyyaml>=6.0.2",
+    "scikit-learn>=1.7.0",
+    "splines>=0.3.2",
+    "tensorboard>=2.19.0",
+    "torch>=2.7.1",
+    "torchmetrics[image]>=1.7.3",
+    "torchvision>=0.22.1",
+    "tqdm>=4.67.1",
+    "tyro>=0.9.24",
+    "viser>=0.2.23",
+]
+
+[tool.uv.sources]
+fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim", rev = "328dc9836f513d00c4b5bc38fe30478b4435cbb5" }
+fused-bilagrid = { git = "https://github.com/harry7557558/fused-bilagrid", rev = "90f9788e57d3545e3a033c1038bb9986549632fe" }

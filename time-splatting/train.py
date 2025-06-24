@@ -80,7 +80,7 @@ class Config:
     # Noise injected to the time label to avoid overfitting
     time_noise_scale: float = 1
     # Noise injected to sun angle label to avoid overfitting
-    angle_noise_scale: float = 0.4
+    angle_noise_scale: float = 0.2
 
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
@@ -187,7 +187,6 @@ def create_splats_with_optimizers(
     use_shading: bool = False,
     device: str = "cuda",
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-
     points = torch.rand((init_num_pts, 3))
     points[..., 2] = 1
     points = init_extent * scene_scale * (points * 2 - 1)
@@ -734,11 +733,12 @@ class Runner:
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
-
+                """
                 loss += (
                     cfg.scale_reg
                     * torch.abs(torch.exp(self.splats["time_scales"])).mean()
                 )
+                """
 
                 if cfg.use_shading:
                     loss += (
@@ -746,12 +746,14 @@ class Runner:
                         * torch.abs(torch.exp(self.shading_splats["scales"])).mean()
                     )
 
+                    """
                     loss += (
                         cfg.scale_reg
                         * torch.abs(
                             torch.exp(self.shading_splats["time_scales"])
                         ).mean()
                     )
+                    """
 
             loss.backward()
 
