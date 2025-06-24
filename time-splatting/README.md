@@ -28,5 +28,5 @@ Since publication, we have integrated new techniques into the time splatting pip
 ## Choosing Hyperparameters
 A good time-lapse should balance detail and smoothness. The most important hyperparameters controlling smoothness are `time_noise_scale` and `angle_noise_scale`, which are multipliers for the amount of noise injected into the time and sun angle labels. A higher value will create a smoother time-lapse, but will sacrifice detail. 
 
-The rest of the hyperparameters are the same as in a typical 3D Gaussian splatting pipelines. Options such as learning rate, initial number of Gaussians, etc. can be adjusted. 
+The rest of the hyperparameters are the same as in a typical 3D Gaussian splatting pipeline. Options such as learning rate, initial number of Gaussians, etc. can be adjusted. 
 
