@@ -1,11 +1,11 @@
+import bisect
 import json
-import math
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 import imageio
 import numpy as np
@@ -15,159 +15,22 @@ import tqdm
 import tyro
 import viser
 import yaml
-from dataloader import TimeLapseDataset, sun_angle
-
 from fused_ssim import fused_ssim
+from gsplat.distributed import cli
+from gsplat.optimizers import SelectiveAdam
+from gsplat.rendering import rasterization
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from nerfview import CameraState
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
-from utils import AppearanceOptModule, knn, set_random_seed
 
-from gsplat import export_splats
-from gsplat.compression import PngCompression
-from gsplat.distributed import cli
-from gsplat.optimizers import SelectiveAdam
-from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
-from gsplat_viewer import GsplatViewer, GsplatRenderTabState
-from nerfview import CameraState, apply_float_colormap
-from datetime import datetime, timedelta
-import bisect
-
-
-@dataclass
-class Config:
-    # Disable viewer
-    disable_viewer: bool = False
-    # Path to the .pt files. If provide, it will skip training and run evaluation only.
-    ckpt: Optional[List[str]] = None
-    # Name of compression strategy to use
-    compression: Optional[Literal["png"]] = None
-    # Render trajectory path
-    render_traj_path: str = "interp"
-
-    # Path to the time-lapse dataset
-    data_dir: str = "../../gsplat/examples/data/sunnyhoy_cropped_new"
-    # Downsample factor for the dataset
-    data_factor: int = 1
-    # Directory to save results
-    result_dir: str = "results/timelapse"
-    # Every N images there is a test image
-    test_every: int = 8
-    # Aspect ratio of the rendered images, used for initialization
-    aspect_ratio: float = 4 / 3
-
-    # Port for the viewer server
-    port: int = 8080
-    # A global factor to scale the number of training steps
-    steps_scaler: float = 1.0
-
-    # Number of training steps
-    max_steps: int = 30_000
-    # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [])
-    # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [])
-    # Whether to save ply file (storage size can be large)
-    save_ply: bool = False
-    # Steps to save the model as ply
-    ply_steps: List[int] = field(default_factory=lambda: [])
-
-    # Whether to use shading Gaussians for intrinsic image decomposition
-    use_shading: bool = True
-    # Noise injected to the time label to avoid overfitting
-    time_noise_scale: float = 1
-    # Noise injected to sun angle label to avoid overfitting
-    angle_noise_scale: float = 0.2
-
-    # Initial number of GSs. Ignored if using sfm
-    init_num_pts: int = 100_000
-    # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
-    init_extent: float = 1.0
-    # Initial opacity of GS
-    init_opa: float = 0.1
-    # Initial scale of GS
-    init_scale: float = 1.0
-    # Weight for SSIM loss
-    ssim_lambda: float = 0.2
-
-    # Near plane clipping distance
-    near_plane: float = 0.01
-    # Far plane clipping distance
-    far_plane: float = 1e10
-
-    # Strategy for GS densification
-    strategy: Union[DefaultStrategy, MCMCStrategy] = field(default_factory=MCMCStrategy)
-
-    shading_strategy: Union[DefaultStrategy, MCMCStrategy] = field(
-        default_factory=MCMCStrategy
-    )
-
-    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
-    antialiased: bool = True
-    # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
-    packed: bool = False
-    # Use sparse gradients for optimization. (experimental)
-    sparse_grad: bool = False
-    # Use visible adam from Taming 3DGS. (experimental)
-    visible_adam: bool = False
-
-    # LR for 3D point positions
-    means_lr: float = 1.6e-4
-    # LR for Gaussian scale factors
-    scales_lr: float = 5e-3
-    # LR for alpha blending weights
-    opacities_lr: float = 5e-2
-    # LR for orientation (quaternions)
-    quats_lr: float = 1e-3
-    # LR for SH band 0 (brightness)
-    sh0_lr: float = 2.5e-3
-
-    # Opacity regularization
-    opacity_reg: float = 0.0
-    # Scale regularization
-    scale_reg: float = 0.0
-
-    # Enable appearance optimization. (experimental)
-    app_opt: bool = False
-    # Appearance embedding dimension
-    app_embed_dim: int = 16
-    # Learning rate for appearance optimizatin
-    app_opt_lr: float = 1e-3
-    # Regularization for appearance optimization as weight decay
-    app_opt_reg: float = 1e-6
-
-    # Whether use fused-bilateral grid
-    use_bilagrid: bool = True
-    # Shape of the bilateral grid (X, Y, W)
-    bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
-
-    # Dump information to tensorboard every this steps
-    tb_every: int = 100
-    # Save training images to tensorboard
-    tb_save_image: bool = False
-
-    lpips_net: Literal["vgg", "alex"] = "alex"
-
-    def adjust_steps(self, strategy, factor: float):
-        self.eval_steps = [int(i * factor) for i in self.eval_steps]
-        self.save_steps = [int(i * factor) for i in self.save_steps]
-        self.ply_steps = [int(i * factor) for i in self.ply_steps]
-        self.max_steps = int(self.max_steps * factor)
-
-        if isinstance(strategy, DefaultStrategy):
-            strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
-            strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
-            strategy.reset_every = int(strategy.reset_every * factor)
-            strategy.refine_every = int(strategy.refine_every * factor)
-        elif isinstance(strategy, MCMCStrategy):
-            strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
-            strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
-            strategy.refine_every = int(strategy.refine_every * factor)
-        else:
-            assert_never(strategy)
+from dataloader import TimeLapseDataset, sun_angle
+from gsplat_viewer import GsplatRenderTabState, GsplatViewer
+from options import TimeSplattingConfig
+from utils import ToneMapper, knn, set_random_seed
 
 
 def create_splats_with_optimizers(
@@ -192,7 +55,12 @@ def create_splats_with_optimizers(
     points = init_extent * scene_scale * (points * 2 - 1)
 
     # Manually set 4:3 aspect ratio
-    points[..., 1] *= 3 / 4
+    H = dataset[0]["image"].shape[0]
+    W = dataset[0]["image"].shape[1]
+    if H > W:  # height > width
+        points[..., 0] *= W / H
+    else:
+        points[..., 1] *= H / W
 
     if use_shading:
         rgbs = torch.rand((init_num_pts, 1))
@@ -204,8 +72,6 @@ def create_splats_with_optimizers(
     dist2_avg = (knn(points[:, :2], 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
     dist_avg = torch.sqrt(dist2_avg)
 
-    if use_shading:
-        init_scale *= 10
     scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
 
     N = points.shape[0]
@@ -268,11 +134,12 @@ def create_splats_with_optimizers(
 class Runner:
     """Engine for training and testing."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: TimeSplattingConfig) -> None:
         set_random_seed(42)
 
         self.cfg = cfg
         self.device = "cuda"
+        cfg.result_dir = f"results/{os.path.basename(cfg.data_dir)}"
 
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
@@ -297,7 +164,6 @@ class Runner:
         )
         self.valset = TimeLapseDataset(cfg.data_dir, split="val")
         self.scene_scale = 1.1
-        print("Scene scale:", self.scene_scale)
 
         # Model
         self.splats, self.optimizers = create_splats_with_optimizers(
@@ -370,32 +236,14 @@ class Runner:
             else:
                 assert_never(self.cfg.shading_strategy)
 
-        # Compression Strategy
-        self.compression_method = None
-        if cfg.compression is not None:
-            if cfg.compression == "png":
-                self.compression_method = PngCompression()
-            else:
-                raise ValueError(f"Unknown compression strategy: {cfg.compression}")
-
         self.app_optimizers = []
-        if cfg.app_opt:
-            assert feature_dim is not None
-            self.app_module = AppearanceOptModule(
-                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
-            ).to(self.device)
-            # initialize the last layer to be zero so that the initial output is zero.
-            torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
-            torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
+        if cfg.tone_mapper:
+            self.tone_mapper = ToneMapper(3, len(self.trainset)).to(self.device)
+
             self.app_optimizers = [
                 torch.optim.Adam(
-                    self.app_module.embeds.parameters(),
-                    lr=cfg.app_opt_lr * 10.0,
-                    weight_decay=cfg.app_opt_reg,
-                ),
-                torch.optim.Adam(
-                    self.app_module.color_head.parameters(),
-                    lr=cfg.app_opt_lr,
+                    self.tone_mapper.parameters(),
+                    lr=cfg.tone_mapper_lr,
                 ),
             ]
 
@@ -448,7 +296,6 @@ class Runner:
         """
         N = splats["times"].shape[0]
         d = splats["times"].shape[-1]
-        triu_len = (d * (d + 1)) // 2  # number of elements in the lower triangular part
         tril = torch.tril_indices(d, d, offset=-1)
         L = torch.eye(d, device=self.device).reshape(1, d, d).repeat(N, 1, 1)
         if d > 1:
@@ -482,7 +329,6 @@ class Runner:
 
         time_delta = times[None, ...] - time_means  # [N, d]
 
-        """
         # Upper triangular part of the time covariance matrix
         if d > 1:
             time_cholesky = self.splat_cholesky(splats).transpose(1, 2)  # [N, d, d]
@@ -492,7 +338,7 @@ class Runner:
 
         else:
             time_anisotropic = time_delta
-        """
+
         time_anisotropic = time_delta
         time_delta = time_anisotropic / time_scales  # [N, d]
 
@@ -500,19 +346,8 @@ class Runner:
 
         opacities = opacities * time_alpha
 
-        image_ids = kwargs.pop("image_ids", None)
-        if self.cfg.app_opt:
-            colors = self.app_module(
-                features=self.splats["features"],
-                embed_ids=image_ids,
-                dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
-                sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
-            )
-            colors = colors + splats["colors"]
-            colors = torch.sigmoid(colors)
-        else:
-            colors = splats["colors"]  # [N, 3]
-            colors = torch.sigmoid(colors)  # [N, 3]
+        colors = splats["colors"]  # [N, 3]
+        colors = torch.sigmoid(colors)  # [N, 3]
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
@@ -603,7 +438,7 @@ class Runner:
                 trainloader_iter = iter(trainloader)
                 data = next(trainloader_iter)
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+            camtoworlds = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
@@ -627,11 +462,11 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
+                near_plane=0.01,
+                far_plane=100,
                 render_mode="RGB",
                 masks=masks,
+                backgrounds=torch.tensor([(1.0, 1.0, 1.0)], device=self.device),
             )
 
             if cfg.use_shading:
@@ -650,20 +485,24 @@ class Runner:
                     [times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1
                 )  # [C, 3]
 
-                shading_colors, shading_alphas, shading_info = self.rasterize_splats(
+                shading_colors, _, shading_info = self.rasterize_splats(
                     splats=self.shading_splats,
                     times=times,
                     camtoworlds=camtoworlds,
                     Ks=Ks,
                     width=width,
                     height=height,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    image_ids=image_ids,
+                    near_plane=0.01,
+                    far_plane=100,
                     render_mode="RGB",
                     masks=masks,
                     backgrounds=torch.tensor([(1.0,)], device=self.device),
                 )
+
+                if cfg.tone_mapper:
+                    I_wb = self.tone_mapper(times)
+                    shading_colors = shading_colors * I_wb[None, ...]
+
                 colors = colors * shading_colors
 
             alphas = data["alpha"].to(device) / 255
@@ -682,6 +521,10 @@ class Runner:
                     colors,
                     image_ids.unsqueeze(-1),
                 )["rgb"]
+
+            if cfg.random_bkgd:
+                bkgd = torch.rand(1, 3, device=device)
+                colors = colors + bkgd * (1.0 - alphas)
 
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
@@ -733,27 +576,12 @@ class Runner:
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
-                """
-                loss += (
-                    cfg.scale_reg
-                    * torch.abs(torch.exp(self.splats["time_scales"])).mean()
-                )
-                """
 
                 if cfg.use_shading:
                     loss += (
                         +cfg.scale_reg
                         * torch.abs(torch.exp(self.shading_splats["scales"])).mean()
                     )
-
-                    """
-                    loss += (
-                        cfg.scale_reg
-                        * torch.abs(
-                            torch.exp(self.shading_splats["time_scales"])
-                        ).mean()
-                    )
-                    """
 
             loss.backward()
 
@@ -790,8 +618,11 @@ class Runner:
                 ) as f:
                     json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
-                if cfg.app_opt:
-                    data["app_module"] = self.app_module.state_dict()
+
+                if cfg.use_shading:
+                    data["shading_splats"] = self.shading_splats.state_dict()
+                if cfg.tone_mapper:
+                    data["tone_mapper"] = self.tone_mapper.state_dict()
                 torch.save(data, f"{self.ckpt_dir}/ckpt_{step}.pt")
 
             # Turn Gradients into Sparse Tensor before running optimizer
@@ -889,12 +720,8 @@ class Runner:
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
+                # self.eval(step)
                 self.render_traj(step)
-
-            # run compression
-            if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                self.run_compression(step=step)
 
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
@@ -913,6 +740,8 @@ class Runner:
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
         print("Running evaluation...")
+
+        # WARNING: Not tested with time splatting yet
         cfg = self.cfg
         device = self.device
 
@@ -938,9 +767,10 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
+                near_plane=0.01,
+                far_plane=100,
                 masks=masks,
+                backgrounds=torch.tensor([(1.0, 1.0, 1.0)], device=self.device),
             )  # [1, H, W, 3]
 
             if cfg.use_shading:
@@ -953,13 +783,11 @@ class Runner:
                     Ks=Ks,
                     width=width,
                     height=height,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
+                    near_plane=0.01,
+                    far_plane=100,
                     masks=masks,
                     backgrounds=torch.tensor([(1.0,)], device=self.device),
                 )
-                bkgd = torch.ones(1, 3, device=device)
-                shading_colors = shading_colors + bkgd * (1.0 - shading_alphas)
                 colors = colors * shading_colors
 
             torch.cuda.synchronize()
@@ -1021,69 +849,84 @@ class Runner:
     @torch.no_grad()
     def render_traj(self, step: int):
         """Entry for trajectory rendering."""
-        if self.cfg.disable_video:
-            return
+
         print("Running trajectory rendering...")
         cfg = self.cfg
         device = self.device
 
-        camtoworlds_all = np.eye(4)[None, ...]  # self.parser.camtoworlds[5:-5]
-        if cfg.render_traj_path == "interp":
-            camtoworlds_all = generate_interpolated_path(
-                camtoworlds_all, 1
-            )  # [N, 3, 4]
-        elif cfg.render_traj_path == "ellipse":
-            height = camtoworlds_all[:, 2, 3].mean()
-            camtoworlds_all = generate_ellipse_path_z(
-                camtoworlds_all, height=height
-            )  # [N, 3, 4]
-        elif cfg.render_traj_path == "spiral":
-            camtoworlds_all = generate_spiral_path(
-                camtoworlds_all,
-                bounds=self.parser.bounds * self.scene_scale,
-                spiral_scale_r=self.parser.extconf["spiral_radius_scale"],
-            )
-        else:
-            raise ValueError(
-                f"Render trajectory type not supported: {cfg.render_traj_path}"
-            )
+        times = np.linspace(0, 1, 600)
+        # hours = np.linspace(0, 1, 600)
 
-        camtoworlds_all = np.concatenate(
-            [
-                camtoworlds_all,
-                np.repeat(
-                    np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds_all), axis=0
-                ),
-            ],
-            axis=1,
-        )  # [N, 4, 4]
+        period = 60  # seconds
 
-        camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
-        width, height = list(self.parser.imsize_dict.values())[0]
+        # hours = np.sin(hours * 2 * np.pi / period) * 4 + 12  # [8:00, 16:00] at 1Hz
+        angles = []
+        for i in range(len(times)):
+            date, _, angle = self.abolute_to_relative_time(t=times[i], hour=10)
+            # times[i] = t
+            angles.append(angle)
+
+        width, height = 1920, 1080
+
+        fov = 120
+        fx = fy = height / (2 * np.tan(np.deg2rad(fov) / 2))
+        cy = height / 2
+        cx = width / 2
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+        K = torch.from_numpy(K).float().to(self.device)
+        c2w = torch.eye(4).float().to(device)
 
         # save to video
         video_dir = f"{cfg.result_dir}/videos"
         os.makedirs(video_dir, exist_ok=True)
-        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
-        for i in tqdm.trange(len(camtoworlds_all), desc="Rendering trajectory"):
-            camtoworlds = camtoworlds_all[i : i + 1]
-            Ks = K[None]
-
-            renders, _, _ = self.rasterize_splats(
-                times=0.5,
-                camtoworlds=camtoworlds,
-                Ks=Ks,
+        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=60)
+        for i in tqdm.trange(len(times), desc="Rendering trajectory"):
+            albedos, _, _ = self.rasterize_splats(
+                splats=self.splats,
+                times=torch.tensor([times[i]]).float().cuda(),
+                camtoworlds=c2w[None],
+                Ks=K[None],
                 width=width,
                 height=height,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                render_mode="RGB+ED",
-            )  # [1, H, W, 4]
-            colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
-            depths = renders[..., 3:4]  # [1, H, W, 1]
-            depths = (depths - depths.min()) / (depths.max() - depths.min())
-            canvas_list = [colors, depths.repeat(1, 1, 1, 3)]
+                near_plane=0.01,
+                far_plane=100,
+                render_mode="RGB",
+                backgrounds=torch.tensor([(1.0, 1.0, 1.0)], device=self.device),
+            )  # [1, H, W, 3]
+
+            if cfg.use_shading:
+                shading_time = (
+                    torch.tensor([times[i], angles[i][0], angles[i][1]]).float().cuda()
+                )
+
+                shading, _, _ = self.rasterize_splats(
+                    splats=self.shading_splats,
+                    times=shading_time,
+                    camtoworlds=c2w[None],
+                    Ks=K[None],
+                    width=width,
+                    height=height,
+                    near_plane=0.01,
+                    far_plane=100,
+                    backgrounds=torch.tensor([(1.0,)], device=self.device),
+                    render_mode="RGB",
+                )  # [1, H, W, 3]
+
+                if self.cfg.tone_mapper:
+                    I_wb = self.tone_mapper(times)
+                    shading = shading * I_wb[None, ...]
+
+                shading = shading.repeat(1, 1, 1, 3)
+
+                renders = albedos * shading
+                shadings = torch.clamp(shading, 0.0, 1.0)  # [1, H, W, 3]
+            else:
+                renders = albedos
+
+            renders = torch.clamp(renders, 0.0, 1.0)
+            albedos = torch.clamp(albedos, 0.0, 1.0)  # [1, H, W, 3]
+
+            canvas_list = [renders]
 
             # write images
             canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
@@ -1093,20 +936,35 @@ class Runner:
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
     @torch.no_grad()
-    def run_compression(self, step: int):
-        """Entry for running compression."""
-        print("Running compression...")
+    def abolute_to_relative_time(self, t: float, hour: float):
+        end_day: datetime = self.trainset.end_date
+        start_day: datetime = self.trainset.start_date
 
-        compress_dir = f"{cfg.result_dir}/compression"
-        os.makedirs(compress_dir, exist_ok=True)
+        num_days = (end_day - start_day).days
 
-        self.compression_method.compress(compress_dir, self.splats)
+        days_elapsed = int(num_days * t)
+        date: datetime = start_day + timedelta(
+            days=days_elapsed, seconds=hour * 60 * 60
+        )
+        left_idx = max(
+            bisect.bisect_left(self.trainset.unique_days, days_elapsed) - 1, 0
+        )
+        right_idx = (
+            left_idx + 1 if left_idx + 1 < len(self.trainset.unique_days) else left_idx
+        )
+        left = self.trainset.unique_days[left_idx]
+        right = self.trainset.unique_days[right_idx]
 
-        # evaluate compression
-        splats_c = self.compression_method.decompress(compress_dir)
-        for k in splats_c.keys():
-            self.splats[k].data = splats_c[k].to(self.device)
-        self.eval(step=step, stage="compress")
+        t = (days_elapsed - left) / (right - left + 1e-8)  # normalize to [0, 1]
+        t = (
+            self.trainset.days_linspace[left_idx] * (1 - t)
+            + self.trainset.days_linspace[right_idx] * t
+        )
+
+        angle = sun_angle(date)
+        angle = (angle[0] / 360, angle[1] / 90)  # normalize to [0, 1]
+
+        return date, t, angle
 
     @torch.no_grad()
     def _viewer_render_fn(
@@ -1124,44 +982,21 @@ class Runner:
         K = camera_state.get_K((width, height))
         K = torch.from_numpy(K).float().to(self.device)
 
-        end_day: datetime = self.trainset.end_date
-        end_day = end_day.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_day: datetime = self.trainset.start_date
-        start_day = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
-        num_days = (end_day - start_day).days
-
-        days_elapsed = int(num_days * render_tab_state.time)
-        date: datetime = start_day + timedelta(
-            days=days_elapsed, seconds=render_tab_state.hour * 60 * 60
-        )
-        left_idx = max(
-            bisect.bisect_left(self.trainset.unique_days, days_elapsed) - 1, 0
-        )
-        right_idx = (
-            left_idx + 1 if left_idx + 1 < len(self.trainset.unique_days) else left_idx
-        )
-        left = self.trainset.unique_days[left_idx]
-        right = self.trainset.unique_days[right_idx]
-
-        t = (days_elapsed - left) / (right - left + 1e-8)  # normalize to [0, 1]
-        t = (
-            self.trainset.days_linspace[left_idx] * (1 - t)
-            + self.trainset.days_linspace[right_idx] * t
+        date, t, angle = self.abolute_to_relative_time(
+            render_tab_state.time, render_tab_state.hour
         )
 
         times = torch.tensor([t]).float().cuda()
 
-        render_colors, render_alphas, info = self.rasterize_splats(
+        render_colors, _, info = self.rasterize_splats(
             splats=self.splats,
             times=times,
             camtoworlds=c2w[None],
             Ks=K[None],
             width=width,
             height=height,
-            near_plane=render_tab_state.near_plane,
-            far_plane=render_tab_state.far_plane,
-            radius_clip=render_tab_state.radius_clip,
-            eps2d=render_tab_state.eps2d,
+            near_plane=0.01,
+            far_plane=100,
             backgrounds=torch.tensor([render_tab_state.backgrounds], device=self.device)
             / 255.0,
             render_mode="RGB",
@@ -1169,38 +1004,40 @@ class Runner:
         )  # [1, H, W, 3]
 
         if self.cfg.use_shading and render_tab_state.render_mode != "albedo":
-            angle = sun_angle(date)
-            angle = (angle[0] / 360, angle[1] / 90)  # normalize to [0, 1]
-
             times = (
                 torch.tensor([render_tab_state.time, angle[0], angle[1]]).float().cuda()
             )
 
-            shading_colors, shading_alphas, shading_info = self.rasterize_splats(
+            shading_colors, _, shading_info = self.rasterize_splats(
                 splats=self.shading_splats,
                 times=times,
                 camtoworlds=c2w[None],
                 Ks=K[None],
                 width=width,
                 height=height,
-                near_plane=render_tab_state.near_plane,
-                far_plane=render_tab_state.far_plane,
-                radius_clip=render_tab_state.radius_clip,
-                eps2d=render_tab_state.eps2d,
+                near_plane=0.01,
+                far_plane=100,
                 backgrounds=torch.tensor([(1.0,)], device=self.device),
                 render_mode="RGB",
                 rasterize_mode=render_tab_state.rasterize_mode,
             )  # [1, H, W, 3]
+
+            if self.cfg.tone_mapper:
+                I_wb = self.tone_mapper(times)
+                shading_colors = shading_colors * I_wb[None, ...]
+            else:
+                shading_colors = shading_colors.repeat(1, 1, 1, 3)
+
             if render_tab_state.render_mode == "full":
                 render_colors = render_colors * shading_colors
             elif render_tab_state.render_mode == "shading":
-                render_colors = shading_colors.repeat(1, 1, 1, 3)
+                render_colors = shading_colors
 
         render_tab_state.total_gs_count = len(self.splats["means"])
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode != "albedo":
-            if render_tab_state.render_mode == "full":
+            if render_tab_state.render_mode == "full" and self.cfg.use_shading:
                 render_tab_state.total_gs_count += len(self.shading_splats["means"])
                 render_tab_state.rendered_gs_count += (
                     (shading_info["radii"] > 0).all(-1).sum().item()
@@ -1214,20 +1051,14 @@ class Runner:
 
         render_tab_state.date = date.strftime("%Y-%m-%d %H:%M:%S")
 
-        if render_tab_state.render_mode != "alpha":
-            # colors represented with sh are not guranteed to be in [0, 1]
-            render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
-            renders = render_colors.cpu().numpy()
-        elif render_tab_state.render_mode == "alpha":
-            alpha = render_alphas[0, ..., 0:1]
+        # colors represented with sh are not guranteed to be in [0, 1]
+        # render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
+        renders = render_colors.cpu().numpy()
 
-            renders = (
-                apply_float_colormap(alpha, render_tab_state.colormap).cpu().numpy()
-            )
         return renders
 
 
-def main(local_rank: int, world_rank: int, world_size: int, cfg: Config):
+def main(local_rank: int, world_rank: int, world_size: int, cfg: TimeSplattingConfig):
     runner = Runner(cfg)
 
     if cfg.ckpt is not None:
@@ -1238,11 +1069,16 @@ def main(local_rank: int, world_rank: int, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        if cfg.use_shading:
+            for k in runner.shading_splats.keys():
+                runner.shading_splats[k].data = torch.cat(
+                    [ckpt["shading_splats"][k] for ckpt in ckpts]
+                )
+
         step = ckpts[0]["step"]
-        runner.eval(step=step)
+        # runner.eval(step=step)
         runner.render_traj(step=step)
-        if cfg.compression is not None:
-            runner.run_compression(step=step)
+
     else:
         runner.train()
 
@@ -1258,25 +1094,24 @@ if __name__ == "__main__":
     configs = {
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
-            Config(
+            TimeSplattingConfig(
                 strategy=DefaultStrategy(reset_every=100000, verbose=True),
                 shading_strategy=DefaultStrategy(reset_every=100000, verbose=True),
             ),
         ),
         "mcmc": (
             "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
-            Config(
+            TimeSplattingConfig(
                 init_opa=0.5,
-                init_scale=0.1,
+                init_scale=1,
                 opacity_reg=0.01,
                 scale_reg=0.01,
-                strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
-                shading_strategy=MCMCStrategy(cap_max=1_000_000, verbose=True),
+                strategy=MCMCStrategy(cap_max=2_000_000, verbose=True),
+                shading_strategy=MCMCStrategy(cap_max=2_000_000, verbose=True),
             ),
         ),
     }
     cfg = tyro.extras.overridable_config_cli(configs)
-    cfg.adjust_steps(cfg.strategy, cfg.steps_scaler)
 
     # Import BilateralGrid and related functions based on configuration
     if cfg.use_bilagrid:
@@ -1286,17 +1121,5 @@ if __name__ == "__main__":
             slice,
             total_variation_loss,
         )
-
-    # try import extra dependencies
-    if cfg.compression == "png":
-        try:
-            import plas
-            import torchpq
-        except:
-            raise ImportError(
-                "To use PNG compression, you need to install "
-                "torchpq (instruction at https://github.com/DeMoriarty/TorchPQ?tab=readme-ov-file#install) "
-                "and plas (via 'pip install git+https://github.com/fraunhoferhhi/PLAS.git') "
-            )
 
     cli(main, cfg, verbose=True)

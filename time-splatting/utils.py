@@ -2,9 +2,33 @@ import random
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
-import torch.nn.functional as F
+
+
+class ToneMapper(nn.Module):
+    """Tone mapping module for shading image"""
+
+    def __init__(
+        self,
+        in_dim: int,
+        n_cameras: int,
+    ):
+        super().__init__()
+
+        self.white_balance = nn.Sequential(
+            nn.Linear(in_dim, 16), nn.LeakyReLU(), nn.Linear(16, 3), nn.Softplus()
+        )
+
+        nn.init.zeros_(self.white_balance[2].weight)
+        nn.init.constant_(self.white_balance[2].bias, 0.8)
+
+    def forward(self, time):
+        I_wb = self.white_balance(time)
+
+        return I_wb[None, None, ...]
 
 
 class AppearanceOptModule(torch.nn.Module):

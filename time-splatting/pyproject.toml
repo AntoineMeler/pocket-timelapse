@@ -1,9 +1,13 @@
 [project]
 name = "time-splatting"
 version = "0.1.0"
-description = "Time splatting is a method for reconstructing a time-lapse, and factorizing it into intrinsic images."
+description = "Time splatting factorizes a time-lapse into intrinsic images."
 readme = "README.md"
 requires-python = ">=3.13"
+maintainers = [
+    { name = "Eric Chen", email="echen01@mit.edu"}
+]
+
 dependencies = [
     "fused-bilagrid",
     "fused-ssim",
@@ -28,3 +32,6 @@ dependencies = [
 [tool.uv.sources]
 fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim", rev = "328dc9836f513d00c4b5bc38fe30478b4435cbb5" }
 fused-bilagrid = { git = "https://github.com/harry7557558/fused-bilagrid", rev = "90f9788e57d3545e3a033c1038bb9986549632fe" }
+gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git" }
+
+

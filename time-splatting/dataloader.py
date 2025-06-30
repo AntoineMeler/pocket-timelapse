@@ -1,16 +1,14 @@
+import glob
 import json
 import os
-import glob
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict
 
-from PIL import Image
 import numpy as np
 import torch
-
-
-from datetime import datetime
-from pysolar.solar import get_azimuth, get_altitude
 from dateutil import tz
+from PIL import Image
+from pysolar.solar import get_altitude, get_azimuth
 
 
 def sun_angle(time: datetime, lat: float = 42.4440, lon: float = -76.5019):
@@ -39,13 +37,12 @@ def datetime_to_relative(
 
 class TimeLapseDataset:
     def __init__(self, path, split: str = "train", data_factor: int = 1):
-
         self.data_factor = data_factor
 
         if split == "train":
             self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
         elif split == "test":
-            self.image_paths = sorted(glob.glob(os.path.join(path + "_test", "*.png")))
+            self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
         elif split == "val":
             self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))[::10]
         self.indices = np.arange(len(self.image_paths))
@@ -80,15 +77,14 @@ class TimeLapseDataset:
         start_date: datetime = min(dates)
         end_date: datetime = max(dates)
 
-        self.start_date = start_date
-        self.end_date = end_date
+        self.end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        start_day: datetime = start_date.replace(
+        self.start_date: datetime = start_date.replace(
             hour=0, minute=0, second=0, microsecond=0
         )
 
         for i in range(len(dates)):
-            delta = dates[i] - start_day
+            delta = dates[i] - self.start_date
             dates[i] = delta.days  # + delta.seconds / (24 * 60 * 60)
 
         # Evenly space the unique dates to [0, 1] range
@@ -109,6 +105,10 @@ class TimeLapseDataset:
 
         self.time_gap = days_linspace[1] - days_linspace[0]
 
+        print("Unique Days:", len(unique_days))
+        print("Time Gap:", self.time_gap)
+        print("Sun Angle Std:", self.sun_angle_std)
+
         return dates, sun_angles
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
@@ -125,8 +125,9 @@ class TimeLapseDataset:
                 Image.BICUBIC,
             )
         image = np.array(image).astype(np.float32)
-        if image.shape[0] > image.shape[1]:  # if height > width, rotate
-            image = np.rot90(image, k=1, axes=(0, 1)).copy()  # rotate 90 degrees
+
+        # if image.shape[0] > image.shape[1]:  # if height > width, rotate
+        #    image = np.rot90(image, k=1, axes=(0, 1)).copy()  # rotate 90 degrees
 
         if image.shape[2] == 4:  # check if image has alpha channel
             alpha = image[..., 3:4]
