@@ -1052,7 +1052,7 @@ class Runner:
         render_tab_state.date = date.strftime("%Y-%m-%d %H:%M:%S")
 
         # colors represented with sh are not guranteed to be in [0, 1]
-        # render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
+        render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
         renders = render_colors.cpu().numpy()
 
         return renders

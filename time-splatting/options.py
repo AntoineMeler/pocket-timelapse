@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
-from typing_extensions import Literal, assert_never
+from typing_extensions import Literal
 
 
 @dataclass
