@@ -93,7 +93,6 @@ class TimeSplattingConfig(DefaultConfig):
     angle_noise_scale: float = 0.1
     # Enable white balance optimization
     tone_mapper: bool = False
-    # Learning rate for appearance optimizatin
     tone_mapper_lr: float = 1e-3
     # Whether use fused-bilateral grid
     use_bilagrid: bool = False
