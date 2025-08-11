@@ -124,7 +124,7 @@ class TimeLapseDataset:
                 ),
                 Image.BICUBIC,
             )
-        image = np.array(image).astype(np.float32)
+        image = np.array(image).astype(np.float32) / 255.
 
         # if image.shape[0] > image.shape[1]:  # if height > width, rotate
         #    image = np.rot90(image, k=1, axes=(0, 1)).copy()  # rotate 90 degrees
