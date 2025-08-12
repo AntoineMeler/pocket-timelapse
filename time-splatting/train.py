@@ -913,10 +913,10 @@ class Runner:
                 )  # [1, H, W, 3]
 
                 if self.cfg.tone_mapper:
-                    I_wb = self.tone_mapper(times)
+                    I_wb = self.tone_mapper(shading_time)
                     shading = shading * I_wb[None, ...]
-
-                shading = shading.repeat(1, 1, 1, 3)
+                else:
+                    shading = shading.repeat(1, 1, 1, 3)
 
                 renders = albedos * shading
                 shadings = torch.clamp(shading, 0.0, 1.0)  # [1, H, W, 3]
