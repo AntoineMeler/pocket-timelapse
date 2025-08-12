@@ -24,11 +24,11 @@ class DefaultConfig:
     port: int = 8080
 
     # Number of training steps
-    max_steps: int = 30_000
+    max_steps: int = 150_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [5000, 10000, 20000, 30000])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 150000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [5000, 10000, 20000, 30000])
+    save_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 150000])
 
     # Initial number of GSs.
     init_num_pts: int = 100_000
@@ -92,7 +92,7 @@ class TimeSplattingConfig(DefaultConfig):
     # Proportional to the sun angle std across images.
     angle_noise_scale: float = 0.1
     # Enable white balance optimization
-    tone_mapper: bool = False
+    tone_mapper: bool = True
     tone_mapper_lr: float = 1e-3
     # Whether use fused-bilateral grid
     use_bilagrid: bool = False

@@ -10,12 +10,13 @@ from dateutil import tz
 from PIL import Image
 from pysolar.solar import get_altitude, get_azimuth
 
+EXTENTION = "jpg"
 
-def sun_angle(time: datetime, lat: float = 42.4440, lon: float = -76.5019):
+def sun_angle(time: datetime, lat: float = 45.2172433, lon: float = 5.8071063):
     """
     Returns the sun angle given a location and time
     """
-    tzinfo = tz.gettz("America/New York")
+    tzinfo = tz.UTC # tz.gettz("America/New York")
     time = time.replace(tzinfo=tzinfo)
 
     azimuth = get_azimuth(lat, lon, time)
@@ -40,11 +41,11 @@ class TimeLapseDataset:
         self.data_factor = data_factor
 
         if split == "train":
-            self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
+            self.image_paths = sorted(glob.glob(os.path.join(path, "*."+EXTENTION)))
         elif split == "test":
-            self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
+            self.image_paths = sorted(glob.glob(os.path.join(path, "*."+EXTENTION)))
         elif split == "val":
-            self.image_paths = sorted(glob.glob(os.path.join(path, "*.png")))[::10]
+            self.image_paths = sorted(glob.glob(os.path.join(path, "*."+EXTENTION)))[::10]
         self.indices = np.arange(len(self.image_paths))
 
         self.dates, self.sun_angles = self.process_times()
@@ -73,6 +74,8 @@ class TimeLapseDataset:
             azimuth, altitude = azimuth / 360, altitude / 90  # normalize to [0, 1]
             angle = [azimuth, altitude]
             sun_angles.append(angle)
+
+            #print(date, angle)
 
         start_date: datetime = min(dates)
         end_date: datetime = max(dates)
@@ -168,5 +171,7 @@ class TimeLapseDataset:
             "clouds": clouds,
             "alpha": torch.from_numpy(alpha).float(),
         }
+
+        #print(data)
 
         return data
