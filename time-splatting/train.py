@@ -1063,22 +1063,23 @@ def main(local_rank: int, world_rank: int, world_size: int, cfg: TimeSplattingCo
 
     if cfg.ckpt is not None:
         # run eval only
-        ckpts = [
-            torch.load(file, map_location=runner.device, weights_only=True)
-            for file in cfg.ckpt
-        ]
-        for k in runner.splats.keys():
-            runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
-        if cfg.use_shading:
-            for k in runner.shading_splats.keys():
-                runner.shading_splats[k].data = torch.cat(
-                    [ckpt["shading_splats"][k] for ckpt in ckpts]
-                )
+        for file in cfg.ckpt:
+            ckpt = torch.load(file, map_location=runner.device, weights_only=True)
 
-        step = ckpts[0]["step"]
-        # runner.eval(step=step)
-        runner.render_traj(step=step)
+            for k in runner.splats.keys():
+                runner.splats[k].data = ckpt["splats"][k]
+    
+            if cfg.use_shading:
+                for k in runner.shading_splats.keys():
+                    runner.shading_splats[k].data = ckpt["shading_splats"][k] 
+                
+                if cfg.tone_mapper:
+                    runner.tone_mapper.load_state_dict(ckpt["tone_mapper"])
 
+            step = ckpt["step"]
+
+            # runner.eval(step=step)
+            runner.render_traj(step=step)
     else:
         runner.train()
 
