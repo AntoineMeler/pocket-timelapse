@@ -24,11 +24,11 @@ class DefaultConfig:
     port: int = 8080
 
     # Number of training steps
-    max_steps: int = 150_000
+    max_steps: int = 50_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 150000])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 50000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 150000])
+    save_steps: List[int] = field(default_factory=lambda: [500, 5000, 10000, 20000, 30000, 50000])
 
     # Initial number of GSs.
     init_num_pts: int = 100_000

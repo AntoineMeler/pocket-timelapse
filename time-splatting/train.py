@@ -397,9 +397,7 @@ class Runner:
 
         schedulers = [
             # means has a learning rate schedule, that end at 0.01 of the initial value
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
+            torch.optim.lr_scheduler.ExponentialLR(self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps))
         ]
 
         if cfg.use_bilagrid:
@@ -653,9 +651,7 @@ class Runner:
             if cfg.visible_adam:
                 gaussian_cnt = self.splats.means.shape[0]
                 if cfg.packed:
-                    visibility_mask = torch.zeros_like(
-                        self.splats["opacities"], dtype=bool
-                    )
+                    visibility_mask = torch.zeros_like(self.splats["opacities"], dtype=bool)
                     visibility_mask.scatter_(0, info["gaussian_ids"], 1)
                 else:
                     visibility_mask = (info["radii"] > 0).all(-1).any(0)
@@ -736,13 +732,9 @@ class Runner:
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (max(time.time() - tic, 1e-10))
-                num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
-                )
+                num_train_rays_per_sec = num_train_rays_per_step * num_train_steps_per_sec
                 # Update the viewer state.
-                self.viewer.render_tab_state.num_train_rays_per_sec = (
-                    num_train_rays_per_sec
-                )
+                self.viewer.render_tab_state.num_train_rays_per_sec = num_train_rays_per_sec
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
 
@@ -979,7 +971,7 @@ class Runner:
             + self.trainset.days_linspace[right_idx] * t
         )
 
-        angle = sun_angle(date)
+        angle = sun_angle(date, self.trainset.gps['latitude'], self.trainset.gps['longitude'])
         angle = (angle[0] / 360, angle[1] / 90)  # normalize to [0, 1]
 
         return date, t, angle
@@ -1000,9 +992,7 @@ class Runner:
         K = camera_state.get_K((width, height))
         K = torch.from_numpy(K).float().to(self.device)
 
-        date, t, angle = self.abolute_to_relative_time(
-            render_tab_state.time, render_tab_state.hour
-        )
+        date, t, angle = self.abolute_to_relative_time(render_tab_state.time, render_tab_state.hour)
 
         times = torch.tensor([t]).float().cuda()
 

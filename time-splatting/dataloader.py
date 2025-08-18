@@ -48,11 +48,16 @@ class TimeLapseDataset:
             self.image_paths = sorted(glob.glob(os.path.join(path, "*."+EXTENTION)))[::10]
         self.indices = np.arange(len(self.image_paths))
 
+        self.gps = {"latitude": 45.2172433, "longitude": 5.8071063}
         metadata_path = os.path.join(path, "metadata.json")
         if os.path.exists(metadata_path):
             print("metadata found", metadata_path)
             with open(metadata_path, "r") as f:
                 self.metadata = json.load(f)
+            photoset_id = list(self.metadata['images'].values())[0]['photoset_id']
+            if "gps" in self.metadata['photosets'][str(photoset_id)]:
+                self.gps = self.metadata['photosets'][str(photoset_id)]['gps']
+                print("gps found", self.gps)
         else:
             print("NO metadata found", metadata_path)
             self.metadata = None
@@ -80,7 +85,7 @@ class TimeLapseDataset:
                 date = datetime.strptime(date, "%Y-%m-%d-%H-%M-%S")
             dates.append(date)
 
-            azimuth, altitude = sun_angle(date)
+            azimuth, altitude = sun_angle(date, self.gps['latitude'], self.gps['longitude'])
             azimuth, altitude = azimuth / 360, altitude / 90  # normalize to [0, 1]
             angle = [azimuth, altitude]
             sun_angles.append(angle)
