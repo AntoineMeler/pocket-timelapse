@@ -15,6 +15,7 @@ class GsplatRenderTabState(RenderTabState):
     # controlable parameters
     time: float = 0
     hour: float = 12
+    weather: float = 1
 
     backgrounds: Tuple[float, float, float] = (255, 255, 255)
     render_mode: Literal["full", "albedo", "shading"] = "full"
@@ -98,6 +99,19 @@ class GsplatViewer(Viewer):
                 self.render_tab_state.hour = hour.value
                 self.rerender(_)
 
+            weather = server.gui.add_slider(
+                "Weather",
+                initial_value=1,
+                min=0.0,
+                max=1.0,
+                step=0.01,
+            )
+
+            @weather.on_update
+            def _(_) -> None:
+                self.render_tab_state.weather = weather.value
+                self.rerender(_)
+
             render_mode_dropdown = server.gui.add_dropdown(
                 "Intrinsic Images",
                 ("full", "albedo", "shading"),
@@ -170,6 +184,7 @@ class GsplatViewer(Viewer):
                 "date": date,
                 "time": time,
                 "hour": hour,
+                "weather": weather,
                 "backgrounds_slider": backgrounds_slider,
                 "render_mode_dropdown": render_mode_dropdown,
                 "rasterize_mode_dropdown": rasterize_mode_dropdown,

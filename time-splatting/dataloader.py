@@ -48,7 +48,16 @@ class TimeLapseDataset:
             self.image_paths = sorted(glob.glob(os.path.join(path, "*."+EXTENTION)))[::10]
         self.indices = np.arange(len(self.image_paths))
 
-        self.dates, self.sun_angles = self.process_times()
+        metadata_path = os.path.join(path, "metadata.json")
+        if os.path.exists(metadata_path):
+            print("metadata found", metadata_path)
+            with open(metadata_path, "r") as f:
+                self.metadata = json.load(f)
+        else:
+            print("NO metadata found", metadata_path)
+            self.metadata = None
+        
+        self.dates, self.sun_angles, self.weather = self.process_times()
 
     def __len__(self):
         return len(self.indices)
@@ -59,6 +68,7 @@ class TimeLapseDataset:
         """
         dates = []
         sun_angles = []
+        weather = []
         for image_path in self.image_paths:
             date = os.path.basename(image_path)
             date = date.split(".")[0]
@@ -74,6 +84,7 @@ class TimeLapseDataset:
             azimuth, altitude = azimuth / 360, altitude / 90  # normalize to [0, 1]
             angle = [azimuth, altitude]
             sun_angles.append(angle)
+            weather.append(self.metadata['images'][image_path.split("/")[-1]]['attributes']['weather'])
 
             #print(date, angle)
 
@@ -112,7 +123,7 @@ class TimeLapseDataset:
         print("Time Gap:", self.time_gap)
         print("Sun Angle Std:", self.sun_angle_std)
 
-        return dates, sun_angles
+        return dates, sun_angles, weather
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         index = self.indices[item]
@@ -141,17 +152,10 @@ class TimeLapseDataset:
         time = self.dates[index]
         angle = self.sun_angles[index]
 
-        clouds_path = os.path.join(os.path.dirname(image_path), "clouds.json")
-        if os.path.exists(clouds_path):
-            with open(clouds_path, "r") as f:
-                cloudiness = json.load(f)
-                clouds = (
-                    float(cloudiness[os.path.splitext(os.path.basename(image_path))[0]])
-                    / 100
-                )
-
+        if self.metadata is not None:
+            weather = self.metadata['images'][image_path.split("/")[-1]]['attributes']['weather']
         else:
-            clouds = 0
+            weather = None
 
         H = image.shape[0]
         fx = fy = H / 2
@@ -168,7 +172,7 @@ class TimeLapseDataset:
             "image_id": index,  # the index of the image in the dataset
             "sun_angle": torch.tensor(angle).float(),
             "time": time,
-            "clouds": clouds,
+            "weather": weather,
             "alpha": torch.from_numpy(alpha).float(),
         }
 

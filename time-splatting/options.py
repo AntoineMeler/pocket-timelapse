@@ -85,6 +85,7 @@ class TimeSplattingConfig(DefaultConfig):
 
     # Whether to use shading Gaussians for intrinsic image decomposition
     use_shading: bool = True
+    use_weather: bool = True # antoine
     # Scaling factor for noise injected to the time label
     # Proportional to time difference between consecutive images
     time_noise_scale: float = 2.0

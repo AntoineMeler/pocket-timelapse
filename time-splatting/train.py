@@ -48,6 +48,7 @@ def create_splats_with_optimizers(
     sparse_grad: bool = False,
     visible_adam: bool = False,
     use_shading: bool = False,
+    use_weather: bool = False,
     device: str = "cuda",
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
     points = torch.rand((init_num_pts, 3))
@@ -87,7 +88,11 @@ def create_splats_with_optimizers(
         sun_altitude = np.random.choice(dataset.sun_angles[:, 1], size=(N, 1))
         sun_angles = np.concatenate([sun_azimuth, sun_altitude], axis=-1)
         sun_angles = torch.tensor(sun_angles).float()
-        times = torch.cat([times, sun_angles], dim=-1)  # [N, 3]
+        if use_weather:
+            weather = torch.tensor(np.random.choice(dataset.weather, size=(N, 1))).float()
+            times = torch.cat([times, sun_angles, weather], dim=-1)  # [N, 4]
+        else:
+            times = torch.cat([times, sun_angles], dim=-1)  # [N, 4]
 
     time_scales = torch.log(
         torch.zeros_like(times) + torch.std(times, dim=0, keepdim=True) * 3
@@ -181,6 +186,7 @@ class Runner:
             sparse_grad=cfg.sparse_grad,
             visible_adam=cfg.visible_adam,
             use_shading=False,
+            use_weather=False,
             device=self.device,
         )
 
@@ -203,6 +209,7 @@ class Runner:
                     sparse_grad=cfg.sparse_grad,
                     visible_adam=cfg.visible_adam,
                     use_shading=True,
+                    use_weather=cfg.use_weather,
                     device=self.device,
                 )
             )
@@ -238,7 +245,7 @@ class Runner:
 
         self.app_optimizers = []
         if cfg.tone_mapper:
-            self.tone_mapper = ToneMapper(3, len(self.trainset)).to(self.device)
+            self.tone_mapper = ToneMapper(3+1, len(self.trainset)).to(self.device)
 
             self.app_optimizers = [
                 torch.optim.Adam(
@@ -481,9 +488,12 @@ class Runner:
                     * self.trainset.sun_angle_std[1].item()
                     * cfg.angle_noise_scale
                 )
-                times = torch.cat(
-                    [times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1
-                )  # [C, 3]
+
+                if cfg.use_weather:
+                    weather = data["weather"].float().to(device)
+                    times = torch.cat([times, sun_angles[:, 0], sun_angles[:, 1], weather], dim=-1)  # [C, 4]
+                else:
+                    times = torch.cat([times, sun_angles[:, 0], sun_angles[:, 1]], dim=-1)  # [C, 3]
 
                 shading_colors, _, shading_info = self.rasterize_splats(
                     splats=self.shading_splats,
@@ -775,7 +785,13 @@ class Runner:
 
             if cfg.use_shading:
                 sun_angles = data["sun_angles"].float().to(device)
-                times = torch.cat([times, sun_angles[0], sun_angles[1]], dim=-1)
+
+                if cfg.use_weather:
+                    weather = data["weather"].float().to(device)
+                    times = torch.cat([times, sun_angles[0], sun_angles[1], weather], dim=-1)
+                else:
+                    times = torch.cat([times, sun_angles[0], sun_angles[1]], dim=-1)
+
                 shading_colors, shading_alphas, _ = self.rasterize_splats(
                     splats=self.shading_splats,
                     times=times,
@@ -895,9 +911,11 @@ class Runner:
             )  # [1, H, W, 3]
 
             if cfg.use_shading:
-                shading_time = (
-                    torch.tensor([times[i], angles[i][0], angles[i][1]]).float().cuda()
-                )
+                if cfg.use_weather:
+                    weather = 1.
+                    shading_time = torch.tensor([times[i], angles[i][0], angles[i][1], weather]).float().cuda()
+                else:
+                    shading_time = torch.tensor([times[i], angles[i][0], angles[i][1]]).float().cuda()
 
                 shading, _, _ = self.rasterize_splats(
                     splats=self.shading_splats,
@@ -1004,9 +1022,10 @@ class Runner:
         )  # [1, H, W, 3]
 
         if self.cfg.use_shading and render_tab_state.render_mode != "albedo":
-            times = (
-                torch.tensor([render_tab_state.time, angle[0], angle[1]]).float().cuda()
-            )
+            if self.cfg.use_weather:
+                times = (torch.tensor([render_tab_state.time, angle[0], angle[1], render_tab_state.weather]).float().cuda())
+            else:
+                times = (torch.tensor([render_tab_state.time, angle[0], angle[1]]).float().cuda())
 
             shading_colors, _, shading_info = self.rasterize_splats(
                 splats=self.shading_splats,
