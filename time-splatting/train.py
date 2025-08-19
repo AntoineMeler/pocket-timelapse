@@ -30,7 +30,7 @@ from typing_extensions import Literal, assert_never
 from dataloader import TimeLapseDataset, sun_angle
 from gsplat_viewer import GsplatRenderTabState, GsplatViewer
 from options import TimeSplattingConfig
-from utils import ToneMapper, knn, set_random_seed
+from utils import ToneMapper, knn, set_random_seed, get_K
 
 
 def create_splats_with_optimizers(
@@ -57,10 +57,7 @@ def create_splats_with_optimizers(
     # Manually set 4:3 aspect ratio
     H = dataset[0]["image"].shape[0]
     W = dataset[0]["image"].shape[1]
-    if H > W:  # height > width
-        points[..., 0] *= W / H
-    else:
-        points[..., 1] *= H / W
+    points[..., 1] *= H / W
 
     if use_shading:
         rgbs = torch.rand((init_num_pts, 1))
@@ -868,11 +865,7 @@ class Runner:
 
         width, height = 1920, 1080
 
-        fov = 120
-        fx = fy = height / (2 * np.tan(np.deg2rad(fov) / 2))
-        cy = height / 2
-        cx = width / 2
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+        K = get_K(width, height, hfov=90.*1.05)
         K = torch.from_numpy(K).float().to(self.device)
         c2w = torch.eye(4).float().to(device)
 
@@ -979,7 +972,7 @@ class Runner:
             height = render_tab_state.viewer_height
         # c2w = camera_state.c2w
         c2w = torch.eye(4).float().to(self.device)
-        K = camera_state.get_K((width, height))
+        K = get_K(width, height, hfov=np.rad2deg(camera_state.fov))
         K = torch.from_numpy(K).float().to(self.device)
 
         date, t, angle = self.abolute_to_relative_time(
