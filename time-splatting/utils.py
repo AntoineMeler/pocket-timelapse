@@ -137,3 +137,10 @@ def set_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def get_K(width, height, hfov):
+    fx = fy = width / (2 * np.tan(np.deg2rad(hfov) / 2))
+    cx = width / 2
+    cy = height / 2
+    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])

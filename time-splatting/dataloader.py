@@ -9,6 +9,7 @@ import torch
 from dateutil import tz
 from PIL import Image
 from pysolar.solar import get_altitude, get_azimuth
+from utils import get_K
 
 EXTENTION = "jpg"
 
@@ -162,11 +163,7 @@ class TimeLapseDataset:
         else:
             weather = None
 
-        hfov = 90
-        fx = fy = image.shape[1] / (2 * np.tan(np.deg2rad(hfov) / 2))
-        cy = image.shape[0] / 2
-        cx = image.shape[1] / 2
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+        K = get_K(width=image.shape[1], height=image.shape[0], hfov=90)
 
         camtoworlds = np.eye(4)
 
