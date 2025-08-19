@@ -848,7 +848,7 @@ class Runner:
 
         width, height = 1920, 1080
 
-        K = get_K(width, height, hfov=90.)
+        K = get_K(width, height, hfov=90.*1.05)
         K = torch.from_numpy(K).float().to(self.device)
         c2w = torch.eye(4).float().to(device)
 
