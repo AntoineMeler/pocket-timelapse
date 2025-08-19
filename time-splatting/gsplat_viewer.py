@@ -150,7 +150,7 @@ class GsplatViewer(Viewer):
         with self._camera_folder:
             fov_degrees_slider = server.gui.add_slider(
                 "FOV",
-                initial_value=120.0,
+                initial_value=90.0,
                 min=0.1,
                 max=175.0,
                 step=0.01,

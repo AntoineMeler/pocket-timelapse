@@ -162,8 +162,8 @@ class TimeLapseDataset:
         else:
             weather = None
 
-        H = image.shape[0]
-        fx = fy = H / 2
+        hfov = 90
+        fx = fy = image.shape[1] / (2 * np.tan(np.deg2rad(hfov) / 2))
         cy = image.shape[0] / 2
         cx = image.shape[1] / 2
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])

@@ -58,10 +58,7 @@ def create_splats_with_optimizers(
     # Manually set 4:3 aspect ratio
     H = dataset[0]["image"].shape[0]
     W = dataset[0]["image"].shape[1]
-    if H > W:  # height > width
-        points[..., 0] *= W / H
-    else:
-        points[..., 1] *= H / W
+    points[..., 1] *= H / W
 
     if use_shading:
         rgbs = torch.rand((init_num_pts, 1))
@@ -221,9 +218,7 @@ class Runner:
         print("Model initialized. Number of GS:", len(self.splats["means"]))
 
         if isinstance(self.cfg.strategy, DefaultStrategy):
-            self.strategy_state = self.cfg.strategy.initialize_state(
-                scene_scale=self.scene_scale
-            )
+            self.strategy_state = self.cfg.strategy.initialize_state(scene_scale=self.scene_scale)
         elif isinstance(self.cfg.strategy, MCMCStrategy):
             self.strategy_state = self.cfg.strategy.initialize_state()
         else:
@@ -231,28 +226,16 @@ class Runner:
 
         if cfg.use_shading:
             if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.shading_strategy_state = (
-                    self.cfg.shading_strategy.initialize_state(
-                        scene_scale=self.scene_scale
-                    )
-                )
+                self.shading_strategy_state = self.cfg.shading_strategy.initialize_state(scene_scale=self.scene_scale)
             elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.shading_strategy_state = (
-                    self.cfg.shading_strategy.initialize_state()
-                )
+                self.shading_strategy_state = self.cfg.shading_strategy.initialize_state()
             else:
                 assert_never(self.cfg.shading_strategy)
 
         self.app_optimizers = []
         if cfg.tone_mapper:
             self.tone_mapper = ToneMapper(3+1, len(self.trainset)).to(self.device)
-
-            self.app_optimizers = [
-                torch.optim.Adam(
-                    self.tone_mapper.parameters(),
-                    lr=cfg.tone_mapper_lr,
-                ),
-            ]
+            self.app_optimizers = [torch.optim.Adam(self.tone_mapper.parameters(), lr=cfg.tone_mapper_lr)]
 
         self.bil_grid_optimizers = []
         if cfg.use_bilagrid:
@@ -262,27 +245,17 @@ class Runner:
                 grid_Y=cfg.bilateral_grid_shape[1],
                 grid_W=cfg.bilateral_grid_shape[2],
             ).to(self.device)
-            self.bil_grid_optimizers = [
-                torch.optim.Adam(
-                    self.bil_grids.parameters(),
-                    lr=2e-3,
-                    eps=1e-15,
-                ),
-            ]
+            self.bil_grid_optimizers = [torch.optim.Adam(self.bil_grids.parameters(), lr=2e-3, eps=1e-15)]
 
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
 
         if cfg.lpips_net == "alex":
-            self.lpips = LearnedPerceptualImagePatchSimilarity(
-                net_type="alex", normalize=True
-            ).to(self.device)
+            self.lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(self.device)
         elif cfg.lpips_net == "vgg":
             # The 3DGS official repo uses lpips vgg, which is equivalent with the following:
-            self.lpips = LearnedPerceptualImagePatchSimilarity(
-                net_type="vgg", normalize=False
-            ).to(self.device)
+            self.lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=False).to(self.device)
         else:
             raise ValueError(f"Unknown LPIPS network: {cfg.lpips_net}")
 
@@ -342,7 +315,6 @@ class Runner:
             # Anisotropic component of the time covariance times the time deltas
             time_anisotropic = time_cholesky @ time_delta[..., None]  # [N, d, 1]
             time_anisotropic = time_anisotropic.squeeze(-1)  # [N, d]
-
         else:
             time_anisotropic = time_delta
 
@@ -876,8 +848,8 @@ class Runner:
 
         width, height = 1920, 1080
 
-        fov = 120
-        fx = fy = height / (2 * np.tan(np.deg2rad(fov) / 2))
+        hfov = 90
+        fx = fy = width / (2 * np.tan(np.deg2rad(hfov) / 2))
         cy = height / 2
         cx = width / 2
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
