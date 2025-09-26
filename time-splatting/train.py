@@ -234,7 +234,7 @@ class Runner:
 
         self.app_optimizers = []
         if cfg.tone_mapper:
-            self.tone_mapper = ToneMapper(3+1, len(self.trainset)).to(self.device)
+            self.tone_mapper = ToneMapper(4 if cfg.use_weather else 3, len(self.trainset)).to(self.device)
             self.app_optimizers = [torch.optim.Adam(self.tone_mapper.parameters(), lr=cfg.tone_mapper_lr)]
 
         self.bil_grid_optimizers = []
@@ -842,13 +842,13 @@ class Runner:
         # hours = np.sin(hours * 2 * np.pi / period) * 4 + 12  # [8:00, 16:00] at 1Hz
         angles = []
         for i in range(len(times)):
-            date, _, angle = self.abolute_to_relative_time(t=times[i], hour=10)
+            date, _, angle = self.abolute_to_relative_time(t=times[i], hour=13)
             # times[i] = t
             angles.append(angle)
 
         width, height = 1920, 1080
 
-        K = get_K(width, height, hfov=90.*1.05)
+        K = get_K(width, height, hfov=90.*1.01)
         K = torch.from_numpy(K).float().to(self.device)
         c2w = torch.eye(4).float().to(device)
 
@@ -872,7 +872,7 @@ class Runner:
 
             if cfg.use_shading:
                 if cfg.use_weather:
-                    weather = 1.
+                    weather = 0.4
                     shading_time = torch.tensor([times[i], angles[i][0], angles[i][1], weather]).float().cuda()
                 else:
                     shading_time = torch.tensor([times[i], angles[i][0], angles[i][1]]).float().cuda()
@@ -1073,8 +1073,8 @@ if __name__ == "__main__":
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
             TimeSplattingConfig(
-                strategy=DefaultStrategy(reset_every=100000, verbose=True),
-                shading_strategy=DefaultStrategy(reset_every=100000, verbose=True),
+                strategy=DefaultStrategy(reset_every=100000*10, verbose=True),
+                shading_strategy=DefaultStrategy(reset_every=100000*10, verbose=True),
             ),
         ),
         "mcmc": (
